@@ -1,5 +1,6 @@
 const express = require("express");
 const cors = require("cors");
+const bcrypt = require("bcryptjs");
 const { Pool } = require("pg");
 
 const app = express();
@@ -14,7 +15,6 @@ const pool = new Pool({
         : false
 });
 
-// Create database tables
 async function initializeDatabase() {
     try {
         await pool.query(`
@@ -38,7 +38,6 @@ async function initializeDatabase() {
     }
 }
 
-// Home
 app.get("/", (req, res) => {
     res.json({
         success: true,
@@ -48,7 +47,6 @@ app.get("/", (req, res) => {
     });
 });
 
-// Test database
 app.get("/api/test-db", async (req, res) => {
     try {
         const result = await pool.query("SELECT NOW()");
@@ -68,7 +66,6 @@ app.get("/api/test-db", async (req, res) => {
     }
 });
 
-// Test users table
 app.get("/api/test-users", async (req, res) => {
     try {
         const result = await pool.query(`
@@ -87,6 +84,92 @@ app.get("/api/test-users", async (req, res) => {
         res.status(500).json({
             success: false,
             message: "Users table is not available"
+        });
+    }
+});
+
+// REAL USER REGISTRATION
+app.post("/api/register", async (req, res) => {
+    try {
+        const {
+            fullName,
+            email,
+            phone,
+            password
+        } = req.body;
+
+        if (!fullName || !email || !phone || !password) {
+            return res.status(400).json({
+                success: false,
+                message: "All fields are required"
+            });
+        }
+
+        const cleanName = fullName.trim();
+        const cleanEmail = email.trim().toLowerCase();
+        const cleanPhone = phone.trim();
+
+        if (password.length < 6) {
+            return res.status(400).json({
+                success: false,
+                message: "Password must be at least 6 characters"
+            });
+        }
+
+        const existingUser = await pool.query(
+            `
+            SELECT id
+            FROM users
+            WHERE email = $1 OR phone = $2
+            `,
+            [cleanEmail, cleanPhone]
+        );
+
+        if (existingUser.rows.length > 0) {
+            return res.status(409).json({
+                success: false,
+                message: "An account with that email or phone number already exists"
+            });
+        }
+
+        const passwordHash = await bcrypt.hash(password, 12);
+
+        const result = await pool.query(
+            `
+            INSERT INTO users
+            (full_name, email, phone, password_hash)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id, full_name, email, phone, about, created_at
+            `,
+            [
+                cleanName,
+                cleanEmail,
+                cleanPhone,
+                passwordHash
+            ]
+        );
+
+        const user = result.rows[0];
+
+        res.status(201).json({
+            success: true,
+            message: "Account created successfully",
+            user: {
+                id: user.id,
+                fullName: user.full_name,
+                email: user.email,
+                phone: user.phone,
+                about: user.about,
+                createdAt: user.created_at
+            }
+        });
+
+    } catch (error) {
+        console.error("Registration error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to create account"
         });
     }
 });
