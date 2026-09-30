@@ -40,6 +40,55 @@ async function initializeDatabase() {
 
         console.log("CheryChat users table ready");
 
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS cherychat_conversations (
+                id SERIAL PRIMARY KEY,
+                user_one_id INTEGER NOT NULL
+                    REFERENCES cherychat_users(id)
+                    ON DELETE CASCADE,
+                user_two_id INTEGER NOT NULL
+                    REFERENCES cherychat_users(id)
+                    ON DELETE CASCADE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+
+                CONSTRAINT different_users
+                    CHECK (user_one_id <> user_two_id),
+
+                CONSTRAINT unique_conversation
+                    UNIQUE (user_one_id, user_two_id)
+            );
+        `);
+
+        console.log("CheryChat conversations table ready");
+
+
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS cherychat_messages (
+                id SERIAL PRIMARY KEY,
+                conversation_id INTEGER NOT NULL
+                    REFERENCES cherychat_conversations(id)
+                    ON DELETE CASCADE,
+                sender_id INTEGER NOT NULL
+                    REFERENCES cherychat_users(id)
+                    ON DELETE CASCADE,
+                message_text TEXT NOT NULL,
+                is_read BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        console.log("CheryChat messages table ready");
+
+
+        await pool.query(`
+            CREATE INDEX IF NOT EXISTS
+            cherychat_messages_conversation_idx
+            ON cherychat_messages(conversation_id, created_at);
+        `);
+
+        console.log("CheryChat messaging database ready");
+
     } catch (error) {
 
         console.error(
