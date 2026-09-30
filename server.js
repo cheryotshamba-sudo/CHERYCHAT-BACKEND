@@ -17,7 +17,7 @@ const pool = new Pool({
 
 
 /* =========================
-   CREATE CHERYCHAT TABLE
+   DATABASE
 ========================= */
 
 async function initializeDatabase() {
@@ -43,7 +43,7 @@ async function initializeDatabase() {
     } catch (error) {
 
         console.error(
-            "CheryChat database initialization failed:",
+            "Database initialization failed:",
             error
         );
 
@@ -104,7 +104,7 @@ app.get("/api/test-db", async (req, res) => {
 
 
 /* =========================
-   TEST CHERYCHAT USERS
+   TEST USERS
 ========================= */
 
 app.get("/api/test-users", async (req, res) => {
@@ -128,7 +128,7 @@ app.get("/api/test-users", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "CheryChat users table error:",
+            "Users table error:",
             error
         );
 
@@ -201,8 +201,6 @@ app.post("/api/register", async (req, res) => {
         }
 
 
-        /* CHECK CHERYCHAT USERS ONLY */
-
         const existingUser =
             await pool.query(
                 `
@@ -255,16 +253,12 @@ app.post("/api/register", async (req, res) => {
         }
 
 
-        /* HASH PASSWORD */
-
         const passwordHash =
             await bcrypt.hash(
                 cleanPassword,
                 12
             );
 
-
-        /* CREATE CHERYCHAT USER */
 
         const result =
             await pool.query(
@@ -343,6 +337,192 @@ app.post("/api/register", async (req, res) => {
 
             message:
                 "Unable to create CheryChat account"
+
+        });
+
+    }
+
+});
+
+
+/* =========================
+   LOGIN
+========================= */
+
+app.post("/api/login", async (req, res) => {
+
+    try {
+
+        const {
+            identifier,
+            password
+        } = req.body;
+
+
+        /* CHECK INPUT */
+
+        if (
+            !identifier ||
+            !password
+        ) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message:
+                    "Email/phone and password are required"
+
+            });
+
+        }
+
+
+        const cleanIdentifier =
+            String(identifier).trim();
+
+
+        /* FIND USER */
+
+        const result =
+            await pool.query(
+                `
+                SELECT
+                    id,
+                    full_name,
+                    email,
+                    phone,
+                    password_hash,
+                    profile_picture,
+                    about,
+                    is_online,
+                    last_seen,
+                    created_at
+                FROM cherychat_users
+                WHERE LOWER(email) = LOWER($1)
+                   OR phone = $1
+                LIMIT 1
+                `,
+                [
+                    cleanIdentifier
+                ]
+            );
+
+
+        if (result.rows.length === 0) {
+
+            return res.status(401).json({
+
+                success: false,
+
+                message:
+                    "Incorrect email, phone number or password"
+
+            });
+
+        }
+
+
+        const user =
+            result.rows[0];
+
+
+        /* CHECK PASSWORD */
+
+        const passwordMatch =
+            await bcrypt.compare(
+                String(password),
+                user.password_hash
+            );
+
+
+        if (!passwordMatch) {
+
+            return res.status(401).json({
+
+                success: false,
+
+                message:
+                    "Incorrect email, phone number or password"
+
+            });
+
+        }
+
+
+        /* UPDATE ONLINE STATUS */
+
+        await pool.query(
+            `
+            UPDATE cherychat_users
+            SET
+                is_online = TRUE,
+                last_seen = CURRENT_TIMESTAMP
+            WHERE id = $1
+            `,
+            [
+                user.id
+            ]
+        );
+
+
+        /* SUCCESS */
+
+        res.json({
+
+            success: true,
+
+            message:
+                "Login successful",
+
+            user: {
+
+                id:
+                    user.id,
+
+                fullName:
+                    user.full_name,
+
+                email:
+                    user.email,
+
+                phone:
+                    user.phone,
+
+                profilePicture:
+                    user.profile_picture,
+
+                about:
+                    user.about,
+
+                isOnline:
+                    true,
+
+                lastSeen:
+                    new Date(),
+
+                createdAt:
+                    user.created_at
+
+            }
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "CHERYCHAT LOGIN ERROR:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to login"
 
         });
 
