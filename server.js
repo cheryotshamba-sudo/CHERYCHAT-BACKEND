@@ -683,6 +683,641 @@ app.get("/api/users/search", async (req, res) => {
 
 
 /* =========================
+   START PRIVATE CONVERSATION
+========================= */
+
+app.post("/api/conversations", async (req, res) => {
+
+    try {
+
+        const {
+            userId,
+            otherUserId
+        } = req.body;
+
+
+        const currentUserId =
+            Number(userId);
+
+        const targetUserId =
+            Number(otherUserId);
+
+
+        if (
+            !Number.isInteger(currentUserId) ||
+            !Number.isInteger(targetUserId)
+        ) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "Valid user IDs are required"
+            });
+
+        }
+
+
+        if (currentUserId === targetUserId) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    "You cannot start a conversation with yourself"
+            });
+
+        }
+
+
+        const users =
+            await pool.query(
+                `
+                SELECT id
+                FROM cherychat_users
+                WHERE id IN ($1, $2)
+                `,
+                [
+                    currentUserId,
+                    targetUserId
+                ]
+            );
+
+
+        if (users.rows.length !== 2) {
+
+            return res.status(404).json({
+                success: false,
+                message:
+                    "One or both users do not exist"
+            });
+
+        }
+
+
+        const userOne =
+            Math.min(
+                currentUserId,
+                targetUserId
+            );
+
+        const userTwo =
+            Math.max(
+                currentUserId,
+                targetUserId
+            );
+
+
+        const result =
+            await pool.query(
+                `
+                INSERT INTO cherychat_conversations
+                (
+                    user_one_id,
+                    user_two_id
+                )
+                VALUES ($1, $2)
+                ON CONFLICT (user_one_id, user_two_id)
+                DO UPDATE SET
+                    user_one_id =
+                        EXCLUDED.user_one_id
+                RETURNING id, user_one_id, user_two_id, created_at
+                `,
+                [
+                    userOne,
+                    userTwo
+                ]
+            );
+
+
+        res.json({
+
+            success: true,
+
+            conversation: {
+
+                id:
+                    result.rows[0].id,
+
+                userOneId:
+                    result.rows[0].user_one_id,
+
+                userTwoId:
+                    result.rows[0].user_two_id,
+
+                createdAt:
+                    result.rows[0].created_at
+
+            }
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "CHERYCHAT CONVERSATION ERROR:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to start conversation"
+
+        });
+
+    }
+
+});
+
+
+/* =========================
+   SEND MESSAGE
+========================= */
+
+app.post("/api/messages", async (req, res) => {
+
+    try {
+
+        const {
+            conversationId,
+            senderId,
+            message
+        } = req.body;
+
+
+        const cleanConversationId =
+            Number(conversationId);
+
+        const cleanSenderId =
+            Number(senderId);
+
+        const cleanMessage =
+            String(message || "").trim();
+
+
+        if (
+            !Number.isInteger(cleanConversationId) ||
+            !Number.isInteger(cleanSenderId) ||
+            !cleanMessage
+        ) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message:
+                    "Conversation, sender and message are required"
+
+            });
+
+        }
+
+
+        if (cleanMessage.length > 5000) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message:
+                    "Message is too long"
+
+            });
+
+        }
+
+
+        const conversation =
+            await pool.query(
+                `
+                SELECT
+                    id,
+                    user_one_id,
+                    user_two_id
+                FROM cherychat_conversations
+                WHERE id = $1
+                LIMIT 1
+                `,
+                [
+                    cleanConversationId
+                ]
+            );
+
+
+        if (conversation.rows.length === 0) {
+
+            return res.status(404).json({
+
+                success: false,
+
+                message:
+                    "Conversation not found"
+
+            });
+
+        }
+
+
+        const chat =
+            conversation.rows[0];
+
+
+        if (
+            cleanSenderId !==
+                chat.user_one_id &&
+            cleanSenderId !==
+                chat.user_two_id
+        ) {
+
+            return res.status(403).json({
+
+                success: false,
+
+                message:
+                    "You are not part of this conversation"
+
+            });
+
+        }
+
+
+        const result =
+            await pool.query(
+                `
+                INSERT INTO cherychat_messages
+                (
+                    conversation_id,
+                    sender_id,
+                    message_text
+                )
+                VALUES
+                ($1, $2, $3)
+                RETURNING
+                    id,
+                    conversation_id,
+                    sender_id,
+                    message_text,
+                    is_read,
+                    created_at
+                `,
+                [
+                    cleanConversationId,
+                    cleanSenderId,
+                    cleanMessage
+                ]
+            );
+
+
+        const sentMessage =
+            result.rows[0];
+
+
+        res.status(201).json({
+
+            success: true,
+
+            message: {
+
+                id:
+                    sentMessage.id,
+
+                conversationId:
+                    sentMessage.conversation_id,
+
+                senderId:
+                    sentMessage.sender_id,
+
+                message:
+                    sentMessage.message_text,
+
+                isRead:
+                    sentMessage.is_read,
+
+                createdAt:
+                    sentMessage.created_at
+
+            }
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "CHERYCHAT SEND MESSAGE ERROR:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to send message"
+
+        });
+
+    }
+
+});
+
+
+/* =========================
+   GET CONVERSATION MESSAGES
+========================= */
+
+app.get("/api/messages/:conversationId", async (req, res) => {
+
+    try {
+
+        const conversationId =
+            Number(req.params.conversationId);
+
+        const userId =
+            Number(req.query.userId);
+
+
+        if (
+            !Number.isInteger(conversationId) ||
+            !Number.isInteger(userId)
+        ) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message:
+                    "Valid conversation and user IDs are required"
+
+            });
+
+        }
+
+
+        const conversation =
+            await pool.query(
+                `
+                SELECT
+                    id,
+                    user_one_id,
+                    user_two_id
+                FROM cherychat_conversations
+                WHERE id = $1
+                LIMIT 1
+                `,
+                [
+                    conversationId
+                ]
+            );
+
+
+        if (conversation.rows.length === 0) {
+
+            return res.status(404).json({
+
+                success: false,
+
+                message:
+                    "Conversation not found"
+
+            });
+
+        }
+
+
+        const chat =
+            conversation.rows[0];
+
+
+        if (
+            userId !== chat.user_one_id &&
+            userId !== chat.user_two_id
+        ) {
+
+            return res.status(403).json({
+
+                success: false,
+
+                message:
+                    "You are not part of this conversation"
+
+            });
+
+        }
+
+
+        const result =
+            await pool.query(
+                `
+                SELECT
+                    id,
+                    conversation_id,
+                    sender_id,
+                    message_text,
+                    is_read,
+                    created_at
+                FROM cherychat_messages
+                WHERE conversation_id = $1
+                ORDER BY created_at ASC, id ASC
+                `,
+                [
+                    conversationId
+                ]
+            );
+
+
+        res.json({
+
+            success: true,
+
+            messages:
+                result.rows.map(message => ({
+
+                    id:
+                        message.id,
+
+                    conversationId:
+                        message.conversation_id,
+
+                    senderId:
+                        message.sender_id,
+
+                    message:
+                        message.message_text,
+
+                    isRead:
+                        message.is_read,
+
+                    createdAt:
+                        message.created_at
+
+                }))
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "CHERYCHAT GET MESSAGES ERROR:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to load messages"
+
+        });
+
+    }
+
+});
+
+
+/* =========================
+   MARK MESSAGES AS READ
+========================= */
+
+app.post("/api/messages/read", async (req, res) => {
+
+    try {
+
+        const {
+            conversationId,
+            userId
+        } = req.body;
+
+
+        const cleanConversationId =
+            Number(conversationId);
+
+        const cleanUserId =
+            Number(userId);
+
+
+        if (
+            !Number.isInteger(cleanConversationId) ||
+            !Number.isInteger(cleanUserId)
+        ) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message:
+                    "Valid conversation and user IDs are required"
+
+            });
+
+        }
+
+
+        const conversation =
+            await pool.query(
+                `
+                SELECT
+                    user_one_id,
+                    user_two_id
+                FROM cherychat_conversations
+                WHERE id = $1
+                `,
+                [
+                    cleanConversationId
+                ]
+            );
+
+
+        if (conversation.rows.length === 0) {
+
+            return res.status(404).json({
+
+                success: false,
+
+                message:
+                    "Conversation not found"
+
+            });
+
+        }
+
+
+        const chat =
+            conversation.rows[0];
+
+
+        if (
+            cleanUserId !== chat.user_one_id &&
+            cleanUserId !== chat.user_two_id
+        ) {
+
+            return res.status(403).json({
+
+                success: false,
+
+                message:
+                    "You are not part of this conversation"
+
+            });
+
+        }
+
+
+        await pool.query(
+            `
+            UPDATE cherychat_messages
+            SET is_read = TRUE
+            WHERE conversation_id = $1
+              AND sender_id <> $2
+              AND is_read = FALSE
+            `,
+            [
+                cleanConversationId,
+                cleanUserId
+            ]
+        );
+
+
+        res.json({
+
+            success: true,
+
+            message:
+                "Messages marked as read"
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "CHERYCHAT READ MESSAGE ERROR:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to mark messages as read"
+
+        });
+
+    }
+
+});
+
+
+/* =========================
    START SERVER
 ========================= */
 
