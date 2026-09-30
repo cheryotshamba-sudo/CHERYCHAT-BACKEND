@@ -17,14 +17,14 @@ const pool = new Pool({
 
 
 /* =========================
-   DATABASE
+   CREATE CHERYCHAT TABLE
 ========================= */
 
 async function initializeDatabase() {
     try {
 
         await pool.query(`
-            CREATE TABLE IF NOT EXISTS users (
+            CREATE TABLE IF NOT EXISTS cherychat_users (
                 id SERIAL PRIMARY KEY,
                 full_name VARCHAR(100) NOT NULL,
                 email VARCHAR(255) UNIQUE NOT NULL,
@@ -38,12 +38,12 @@ async function initializeDatabase() {
             );
         `);
 
-        console.log("Users table ready");
+        console.log("CheryChat users table ready");
 
     } catch (error) {
 
         console.error(
-            "Database initialization failed:",
+            "CheryChat database initialization failed:",
             error
         );
 
@@ -104,7 +104,7 @@ app.get("/api/test-db", async (req, res) => {
 
 
 /* =========================
-   TEST USERS
+   TEST CHERYCHAT USERS
 ========================= */
 
 app.get("/api/test-users", async (req, res) => {
@@ -114,13 +114,13 @@ app.get("/api/test-users", async (req, res) => {
         const result =
             await pool.query(`
                 SELECT COUNT(*) AS total_users
-                FROM users
+                FROM cherychat_users
             `);
 
         res.json({
             success: true,
             message:
-                "Users table is working",
+                "CheryChat users table is working",
             total_users:
                 Number(result.rows[0].total_users)
         });
@@ -128,14 +128,14 @@ app.get("/api/test-users", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "Users table error:",
+            "CheryChat users table error:",
             error
         );
 
         res.status(500).json({
             success: false,
             message:
-                "Users table is not available"
+                "CheryChat users table is not available"
         });
 
     }
@@ -159,8 +159,6 @@ app.post("/api/register", async (req, res) => {
         } = req.body;
 
 
-        /* CHECK REQUIRED FIELDS */
-
         if (
             !fullName ||
             !email ||
@@ -177,8 +175,6 @@ app.post("/api/register", async (req, res) => {
         }
 
 
-        /* CLEAN DATA */
-
         const cleanName =
             String(fullName).trim();
 
@@ -194,8 +190,6 @@ app.post("/api/register", async (req, res) => {
             String(password);
 
 
-        /* PASSWORD LENGTH */
-
         if (cleanPassword.length < 6) {
 
             return res.status(400).json({
@@ -207,13 +201,13 @@ app.post("/api/register", async (req, res) => {
         }
 
 
-        /* CHECK EXISTING USER */
+        /* CHECK CHERYCHAT USERS ONLY */
 
         const existingUser =
             await pool.query(
                 `
                 SELECT id, email, phone
-                FROM users
+                FROM cherychat_users
                 WHERE LOWER(email) = LOWER($1)
                    OR phone = $2
                 LIMIT 1
@@ -230,6 +224,7 @@ app.post("/api/register", async (req, res) => {
             const existing =
                 existingUser.rows[0];
 
+
             if (
                 existing.email.toLowerCase() ===
                 cleanEmail
@@ -238,10 +233,11 @@ app.post("/api/register", async (req, res) => {
                 return res.status(409).json({
                     success: false,
                     message:
-                        "That email address is already registered"
+                        "That email address is already registered on CheryChat"
                 });
 
             }
+
 
             if (
                 existing.phone ===
@@ -251,16 +247,10 @@ app.post("/api/register", async (req, res) => {
                 return res.status(409).json({
                     success: false,
                     message:
-                        "That phone number is already registered"
+                        "That phone number is already registered on CheryChat"
                 });
 
             }
-
-            return res.status(409).json({
-                success: false,
-                message:
-                    "An account with those details already exists"
-            });
 
         }
 
@@ -274,12 +264,12 @@ app.post("/api/register", async (req, res) => {
             );
 
 
-        /* CREATE USER */
+        /* CREATE CHERYCHAT USER */
 
         const result =
             await pool.query(
                 `
-                INSERT INTO users
+                INSERT INTO cherychat_users
                 (
                     full_name,
                     email,
@@ -309,14 +299,12 @@ app.post("/api/register", async (req, res) => {
             result.rows[0];
 
 
-        /* SUCCESS */
-
         res.status(201).json({
 
             success: true,
 
             message:
-                "Account created successfully",
+                "CheryChat account created successfully",
 
             user: {
 
@@ -345,22 +333,16 @@ app.post("/api/register", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "REGISTRATION ERROR:",
+            "CHERYCHAT REGISTRATION ERROR:",
             error
         );
-
 
         res.status(500).json({
 
             success: false,
 
             message:
-                "Unable to create account",
-
-            error:
-                process.env.NODE_ENV === "production"
-                    ? undefined
-                    : error.message
+                "Unable to create CheryChat account"
 
         });
 
