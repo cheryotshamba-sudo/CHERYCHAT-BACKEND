@@ -14,6 +14,29 @@ const pool = new Pool({
         : false
 });
 
+async function initializeDatabase() {
+    try {
+        await pool.query(`
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                full_name VARCHAR(100) NOT NULL,
+                email VARCHAR(255) UNIQUE NOT NULL,
+                phone VARCHAR(20) UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                profile_picture TEXT,
+                about TEXT DEFAULT 'Hey there! I am using CheryChat.',
+                is_online BOOLEAN DEFAULT FALSE,
+                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+        `);
+
+        console.log("Users table ready");
+    } catch (error) {
+        console.error("Database initialization failed:", error);
+    }
+}
+
 app.get("/", (req, res) => {
     res.json({
         success: true,
@@ -44,6 +67,7 @@ app.get("/api/test-db", async (req, res) => {
 
 const PORT = process.env.PORT || 10000;
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
     console.log(`CheryChat backend running on port ${PORT}`);
+    await initializeDatabase();
 });
