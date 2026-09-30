@@ -14,6 +14,7 @@ const pool = new Pool({
         : false
 });
 
+// Create database tables
 async function initializeDatabase() {
     try {
         await pool.query(`
@@ -37,6 +38,7 @@ async function initializeDatabase() {
     }
 }
 
+// Home
 app.get("/", (req, res) => {
     res.json({
         success: true,
@@ -46,6 +48,7 @@ app.get("/", (req, res) => {
     });
 });
 
+// Test database
 app.get("/api/test-db", async (req, res) => {
     try {
         const result = await pool.query("SELECT NOW()");
@@ -65,9 +68,33 @@ app.get("/api/test-db", async (req, res) => {
     }
 });
 
+// Test users table
+app.get("/api/test-users", async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT COUNT(*) AS total_users
+            FROM users
+        `);
+
+        res.json({
+            success: true,
+            message: "Users table is working",
+            total_users: Number(result.rows[0].total_users)
+        });
+    } catch (error) {
+        console.error("Users table error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Users table is not available"
+        });
+    }
+});
+
 const PORT = process.env.PORT || 10000;
 
 app.listen(PORT, async () => {
     console.log(`CheryChat backend running on port ${PORT}`);
+
     await initializeDatabase();
 });
