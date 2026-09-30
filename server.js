@@ -359,8 +359,6 @@ app.post("/api/login", async (req, res) => {
         } = req.body;
 
 
-        /* CHECK INPUT */
-
         if (
             !identifier ||
             !password
@@ -381,8 +379,6 @@ app.post("/api/login", async (req, res) => {
         const cleanIdentifier =
             String(identifier).trim();
 
-
-        /* FIND USER */
 
         const result =
             await pool.query(
@@ -427,8 +423,6 @@ app.post("/api/login", async (req, res) => {
             result.rows[0];
 
 
-        /* CHECK PASSWORD */
-
         const passwordMatch =
             await bcrypt.compare(
                 String(password),
@@ -450,8 +444,6 @@ app.post("/api/login", async (req, res) => {
         }
 
 
-        /* UPDATE ONLINE STATUS */
-
         await pool.query(
             `
             UPDATE cherychat_users
@@ -465,8 +457,6 @@ app.post("/api/login", async (req, res) => {
             ]
         );
 
-
-        /* SUCCESS */
 
         res.json({
 
@@ -532,11 +522,124 @@ app.post("/api/login", async (req, res) => {
 
 
 /* =========================
+   SEARCH USERS
+========================= */
+
+app.get("/api/users/search", async (req, res) => {
+
+    try {
+
+        const q =
+            String(req.query.q || "").trim();
+
+
+        if (!q) {
+
+            return res.json({
+                success: true,
+                users: []
+            });
+
+        }
+
+
+        const search =
+            `%${q}%`;
+
+
+        const result =
+            await pool.query(
+                `
+                SELECT
+                    id,
+                    full_name,
+                    email,
+                    phone,
+                    profile_picture,
+                    about,
+                    is_online,
+                    last_seen
+                FROM cherychat_users
+                WHERE
+                    full_name ILIKE $1
+                    OR email ILIKE $1
+                    OR phone ILIKE $1
+                ORDER BY
+                    is_online DESC,
+                    full_name ASC
+                LIMIT 20
+                `,
+                [
+                    search
+                ]
+            );
+
+
+        res.json({
+
+            success: true,
+
+            users:
+                result.rows.map(user => ({
+
+                    id:
+                        user.id,
+
+                    fullName:
+                        user.full_name,
+
+                    email:
+                        user.email,
+
+                    phone:
+                        user.phone,
+
+                    profilePicture:
+                        user.profile_picture,
+
+                    about:
+                        user.about,
+
+                    isOnline:
+                        user.is_online,
+
+                    lastSeen:
+                        user.last_seen
+
+                }))
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "CHERYCHAT USER SEARCH ERROR:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to search CheryChat users"
+
+        });
+
+    }
+
+});
+
+
+/* =========================
    START SERVER
 ========================= */
 
 const PORT =
     process.env.PORT || 10000;
+
 
 app.listen(PORT, async () => {
 
