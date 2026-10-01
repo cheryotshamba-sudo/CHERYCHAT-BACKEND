@@ -571,6 +571,295 @@ app.post("/api/login", async (req, res) => {
 
 
 /* =========================
+   ONLINE HEARTBEAT
+========================= */
+
+app.post("/api/users/heartbeat", async (req, res) => {
+
+    try {
+
+        const userId =
+            Number(req.body.userId);
+
+
+        if (!Number.isInteger(userId)) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message:
+                    "Valid user ID is required"
+
+            });
+
+        }
+
+
+        const result =
+            await pool.query(
+                `
+                UPDATE cherychat_users
+                SET
+                    is_online = TRUE,
+                    last_seen = CURRENT_TIMESTAMP
+                WHERE id = $1
+                RETURNING
+                    id,
+                    is_online,
+                    last_seen
+                `,
+                [
+                    userId
+                ]
+            );
+
+
+        if (result.rows.length === 0) {
+
+            return res.status(404).json({
+
+                success: false,
+
+                message:
+                    "User not found"
+
+            });
+
+        }
+
+
+        res.json({
+
+            success: true,
+
+            isOnline:
+                result.rows[0].is_online,
+
+            lastSeen:
+                result.rows[0].last_seen
+
+        });
+
+    } catch (error) {
+
+        console.error(
+            "VIBECHAT HEARTBEAT ERROR:",
+            error
+        );
+
+        res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to update online status"
+
+        });
+
+    }
+
+});
+
+
+/* =========================
+   OFFLINE STATUS
+========================= */
+
+app.post("/api/users/logout-status", async (req, res) => {
+
+    try {
+
+        const userId =
+            Number(req.body.userId);
+
+
+        if (!Number.isInteger(userId)) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message:
+                    "Valid user ID is required"
+
+            });
+
+        }
+
+
+        const result =
+            await pool.query(
+                `
+                UPDATE cherychat_users
+                SET
+                    is_online = FALSE,
+                    last_seen = CURRENT_TIMESTAMP
+                WHERE id = $1
+                RETURNING
+                    id,
+                    is_online,
+                    last_seen
+                `,
+                [
+                    userId
+                ]
+            );
+
+
+        if (result.rows.length === 0) {
+
+            return res.status(404).json({
+
+                success: false,
+
+                message:
+                    "User not found"
+
+            });
+
+        }
+
+
+        res.json({
+
+            success: true,
+
+            isOnline:
+                result.rows[0].is_online,
+
+            lastSeen:
+                result.rows[0].last_seen
+
+        });
+
+    } catch (error) {
+
+        console.error(
+            "VIBECHAT OFFLINE STATUS ERROR:",
+            error
+        );
+
+        res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to update offline status"
+
+        });
+
+    }
+
+});
+
+
+/* =========================
+   USER STATUS
+========================= */
+
+app.get("/api/users/:id/status", async (req, res) => {
+
+    try {
+
+        const userId =
+            Number(req.params.id);
+
+
+        if (!Number.isInteger(userId)) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message:
+                    "Valid user ID is required"
+
+            });
+
+        }
+
+
+        const result =
+            await pool.query(
+                `
+                SELECT
+                    id,
+                    full_name,
+                    is_online,
+                    last_seen
+                FROM cherychat_users
+                WHERE id = $1
+                LIMIT 1
+                `,
+                [
+                    userId
+                ]
+            );
+
+
+        if (result.rows.length === 0) {
+
+            return res.status(404).json({
+
+                success: false,
+
+                message:
+                    "User not found"
+
+            });
+
+        }
+
+
+        const user =
+            result.rows[0];
+
+
+        res.json({
+
+            success: true,
+
+            user: {
+
+                id:
+                    user.id,
+
+                fullName:
+                    user.full_name,
+
+                isOnline:
+                    user.is_online,
+
+                lastSeen:
+                    user.last_seen
+
+            }
+
+        });
+
+    } catch (error) {
+
+        console.error(
+            "VIBECHAT USER STATUS ERROR:",
+            error
+        );
+
+        res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to get user status"
+
+        });
+
+    }
+
+});
+
+
+/* =========================
    SEARCH USERS
 ========================= */
 
@@ -1079,487 +1368,4 @@ app.post("/api/messages", async (req, res) => {
 
 
         const cleanConversationId =
-            Number(conversationId);
-
-        const cleanSenderId =
-            Number(senderId);
-
-        const cleanMessage =
-            String(message || "").trim();
-
-
-        if (
-            !Number.isInteger(cleanConversationId) ||
-            !Number.isInteger(cleanSenderId) ||
-            !cleanMessage
-        ) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                message:
-                    "Conversation, sender and message are required"
-
-            });
-
-        }
-
-
-        if (cleanMessage.length > 5000) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                message:
-                    "Message is too long"
-
-            });
-
-        }
-
-
-        const conversation =
-            await pool.query(
-                `
-                SELECT
-                    id,
-                    user_one_id,
-                    user_two_id
-                FROM cherychat_conversations
-                WHERE id = $1
-                LIMIT 1
-                `,
-                [
-                    cleanConversationId
-                ]
-            );
-
-
-        if (conversation.rows.length === 0) {
-
-            return res.status(404).json({
-
-                success: false,
-
-                message:
-                    "Conversation not found"
-
-            });
-
-        }
-
-
-        const chat =
-            conversation.rows[0];
-
-
-        if (
-            cleanSenderId !==
-                chat.user_one_id &&
-            cleanSenderId !==
-                chat.user_two_id
-        ) {
-
-            return res.status(403).json({
-
-                success: false,
-
-                message:
-                    "You are not part of this conversation"
-
-            });
-
-        }
-
-
-        const result =
-            await pool.query(
-                `
-                INSERT INTO cherychat_messages
-                (
-                    conversation_id,
-                    sender_id,
-                    message_text
-                )
-                VALUES
-                ($1, $2, $3)
-                RETURNING
-                    id,
-                    conversation_id,
-                    sender_id,
-                    message_text,
-                    is_read,
-                    created_at
-                `,
-                [
-                    cleanConversationId,
-                    cleanSenderId,
-                    cleanMessage
-                ]
-            );
-
-
-        const sentMessage =
-            result.rows[0];
-
-
-        res.status(201).json({
-
-            success: true,
-
-            message: {
-
-                id:
-                    sentMessage.id,
-
-                conversationId:
-                    sentMessage.conversation_id,
-
-                senderId:
-                    sentMessage.sender_id,
-
-                message:
-                    sentMessage.message_text,
-
-                isRead:
-                    sentMessage.is_read,
-
-                createdAt:
-                    sentMessage.created_at
-
-            }
-
-        });
-
-
-    } catch (error) {
-
-        console.error(
-            "VIBECHAT SEND MESSAGE ERROR:",
-            error
-        );
-
-
-        res.status(500).json({
-
-            success: false,
-
-            message:
-                "Unable to send message"
-
-        });
-
-    }
-
-});
-
-
-/* =========================
-   GET CONVERSATION MESSAGES
-========================= */
-
-app.get("/api/messages/:conversationId", async (req, res) => {
-
-    try {
-
-        const conversationId =
-            Number(req.params.conversationId);
-
-        const userId =
-            Number(req.query.userId);
-
-
-        if (
-            !Number.isInteger(conversationId) ||
-            !Number.isInteger(userId)
-        ) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                message:
-                    "Valid conversation and user IDs are required"
-
-            });
-
-        }
-
-
-        const conversation =
-            await pool.query(
-                `
-                SELECT
-                    id,
-                    user_one_id,
-                    user_two_id
-                FROM cherychat_conversations
-                WHERE id = $1
-                LIMIT 1
-                `,
-                [
-                    conversationId
-                ]
-            );
-
-
-        if (conversation.rows.length === 0) {
-
-            return res.status(404).json({
-
-                success: false,
-
-                message:
-                    "Conversation not found"
-
-            });
-
-        }
-
-
-        const chat =
-            conversation.rows[0];
-
-
-        if (
-            userId !== chat.user_one_id &&
-            userId !== chat.user_two_id
-        ) {
-
-            return res.status(403).json({
-
-                success: false,
-
-                message:
-                    "You are not part of this conversation"
-
-            });
-
-        }
-
-
-        const result =
-            await pool.query(
-                `
-                SELECT
-                    id,
-                    conversation_id,
-                    sender_id,
-                    message_text,
-                    is_read,
-                    created_at
-                FROM cherychat_messages
-                WHERE conversation_id = $1
-                ORDER BY created_at ASC, id ASC
-                `,
-                [
-                    conversationId
-                ]
-            );
-
-
-        res.json({
-
-            success: true,
-
-            messages:
-                result.rows.map(message => ({
-
-                    id:
-                        message.id,
-
-                    conversationId:
-                        message.conversation_id,
-
-                    senderId:
-                        message.sender_id,
-
-                    message:
-                        message.message_text,
-
-                    isRead:
-                        message.is_read,
-
-                    createdAt:
-                        message.created_at
-
-                }))
-
-        });
-
-
-    } catch (error) {
-
-        console.error(
-            "VIBECHAT GET MESSAGES ERROR:",
-            error
-        );
-
-
-        res.status(500).json({
-
-            success: false,
-
-            message:
-                "Unable to load messages"
-
-        });
-
-    }
-
-});
-
-
-/* =========================
-   MARK MESSAGES AS READ
-========================= */
-
-app.post("/api/messages/read", async (req, res) => {
-
-    try {
-
-        const {
-            conversationId,
-            userId
-        } = req.body;
-
-
-        const cleanConversationId =
-            Number(conversationId);
-
-        const cleanUserId =
-            Number(userId);
-
-
-        if (
-            !Number.isInteger(cleanConversationId) ||
-            !Number.isInteger(cleanUserId)
-        ) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                message:
-                    "Valid conversation and user IDs are required"
-
-            });
-
-        }
-
-
-        const conversation =
-            await pool.query(
-                `
-                SELECT
-                    user_one_id,
-                    user_two_id
-                FROM cherychat_conversations
-                WHERE id = $1
-                `,
-                [
-                    cleanConversationId
-                ]
-            );
-
-
-        if (conversation.rows.length === 0) {
-
-            return res.status(404).json({
-
-                success: false,
-
-                message:
-                    "Conversation not found"
-
-            });
-
-        }
-
-
-        const chat =
-            conversation.rows[0];
-
-
-        if (
-            cleanUserId !== chat.user_one_id &&
-            cleanUserId !== chat.user_two_id
-        ) {
-
-            return res.status(403).json({
-
-                success: false,
-
-                message:
-                    "You are not part of this conversation"
-
-            });
-
-        }
-
-
-        await pool.query(
-            `
-            UPDATE cherychat_messages
-            SET is_read = TRUE
-            WHERE conversation_id = $1
-              AND sender_id <> $2
-              AND is_read = FALSE
-            `,
-            [
-                cleanConversationId,
-                cleanUserId
-            ]
-        );
-
-
-        res.json({
-
-            success: true,
-
-            message:
-                "Messages marked as read"
-
-        });
-
-    } catch (error) {
-
-        console.error(
-            "VIBECHAT READ MESSAGE ERROR:",
-            error
-        );
-
-
-        res.status(500).json({
-
-            success: false,
-
-            message:
-                "Unable to mark messages as read"
-
-        });
-
-    }
-
-});
-
-
-/* =========================
-   START SERVER
-========================= */
-
-const PORT =
-    process.env.PORT || 10000;
-
-
-app.listen(PORT, async () => {
-
-    console.log(
-        `VibeChat backend running on port ${PORT}`
-    );
-
-    await initializeDatabase();
-
-});
+           
