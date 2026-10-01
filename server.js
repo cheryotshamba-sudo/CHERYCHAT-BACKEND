@@ -31,7 +31,7 @@ async function initializeDatabase() {
                 phone VARCHAR(30) UNIQUE NOT NULL,
                 password_hash TEXT NOT NULL,
                 profile_picture TEXT,
-                about TEXT DEFAULT 'Hey there! I am using CheryChat.',
+                about TEXT DEFAULT 'Hey there! I am using VibeChat.',
                 is_online BOOLEAN DEFAULT FALSE,
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
@@ -108,7 +108,7 @@ app.get("/", (req, res) => {
 
     res.json({
         success: true,
-        message: "CheryChat Backend is running",
+        message: "VibeChat Backend is running",
         status: "online",
         database: "connected"
     });
@@ -130,7 +130,7 @@ app.get("/api/test-db", async (req, res) => {
         res.json({
             success: true,
             message:
-                "CheryChat database connected successfully",
+                "VibeChat database connected successfully",
             time: result.rows[0].now
         });
 
@@ -169,7 +169,7 @@ app.get("/api/test-users", async (req, res) => {
         res.json({
             success: true,
             message:
-                "CheryChat users table is working",
+                "VibeChat users table is working",
             total_users:
                 Number(result.rows[0].total_users)
         });
@@ -184,7 +184,7 @@ app.get("/api/test-users", async (req, res) => {
         res.status(500).json({
             success: false,
             message:
-                "CheryChat users table is not available"
+                "VibeChat users table is not available"
         });
 
     }
@@ -280,7 +280,7 @@ app.post("/api/register", async (req, res) => {
                 return res.status(409).json({
                     success: false,
                     message:
-                        "That email address is already registered on CheryChat"
+                        "That email address is already registered on VibeChat"
                 });
 
             }
@@ -294,7 +294,7 @@ app.post("/api/register", async (req, res) => {
                 return res.status(409).json({
                     success: false,
                     message:
-                        "That phone number is already registered on CheryChat"
+                        "That phone number is already registered on VibeChat"
                 });
 
             }
@@ -347,7 +347,7 @@ app.post("/api/register", async (req, res) => {
             success: true,
 
             message:
-                "CheryChat account created successfully",
+                "VibeChat account created successfully",
 
             user: {
 
@@ -376,7 +376,7 @@ app.post("/api/register", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "CHERYCHAT REGISTRATION ERROR:",
+            "VIBECHAT REGISTRATION ERROR:",
             error
         );
 
@@ -385,7 +385,7 @@ app.post("/api/register", async (req, res) => {
             success: false,
 
             message:
-                "Unable to create CheryChat account"
+                "Unable to create VibeChat account"
 
         });
 
@@ -551,7 +551,7 @@ app.post("/api/login", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "CHERYCHAT LOGIN ERROR:",
+            "VIBECHAT LOGIN ERROR:",
             error
         );
 
@@ -663,7 +663,7 @@ app.get("/api/users/search", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "CHERYCHAT USER SEARCH ERROR:",
+            "VIBECHAT USER SEARCH ERROR:",
             error
         );
 
@@ -673,7 +673,237 @@ app.get("/api/users/search", async (req, res) => {
             success: false,
 
             message:
-                "Unable to search CheryChat users"
+                "Unable to search VibeChat users"
+
+        });
+
+    }
+
+});
+
+
+/* =========================
+   LIST USER CONVERSATIONS
+========================= */
+
+app.get("/api/conversations", async (req, res) => {
+
+    try {
+
+        const userId =
+            Number(req.query.userId);
+
+
+        if (!Number.isInteger(userId)) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                message:
+                    "A valid user ID is required"
+
+            });
+
+        }
+
+
+        const userCheck =
+            await pool.query(
+                `
+                SELECT id
+                FROM cherychat_users
+                WHERE id = $1
+                LIMIT 1
+                `,
+                [
+                    userId
+                ]
+            );
+
+
+        if (userCheck.rows.length === 0) {
+
+            return res.status(404).json({
+
+                success: false,
+
+                message:
+                    "User not found"
+
+            });
+
+        }
+
+
+        const result =
+            await pool.query(
+                `
+                SELECT
+                    c.id AS conversation_id,
+                    c.created_at AS conversation_created_at,
+
+                    CASE
+                        WHEN c.user_one_id = $1
+                        THEN u2.id
+                        ELSE u1.id
+                    END AS other_user_id,
+
+                    CASE
+                        WHEN c.user_one_id = $1
+                        THEN u2.full_name
+                        ELSE u1.full_name
+                    END AS other_user_name,
+
+                    CASE
+                        WHEN c.user_one_id = $1
+                        THEN u2.email
+                        ELSE u1.email
+                    END AS other_user_email,
+
+                    CASE
+                        WHEN c.user_one_id = $1
+                        THEN u2.profile_picture
+                        ELSE u1.profile_picture
+                    END AS other_user_picture,
+
+                    CASE
+                        WHEN c.user_one_id = $1
+                        THEN u2.about
+                        ELSE u1.about
+                    END AS other_user_about,
+
+                    CASE
+                        WHEN c.user_one_id = $1
+                        THEN u2.is_online
+                        ELSE u1.is_online
+                    END AS other_user_online,
+
+                    CASE
+                        WHEN c.user_one_id = $1
+                        THEN u2.last_seen
+                        ELSE u1.last_seen
+                    END AS other_user_last_seen,
+
+                    lm.message_text AS last_message,
+                    lm.created_at AS last_message_time,
+                    lm.sender_id AS last_message_sender_id,
+
+                    COALESCE(unread.unread_count, 0) AS unread_count
+
+                FROM cherychat_conversations c
+
+                JOIN cherychat_users u1
+                    ON u1.id = c.user_one_id
+
+                JOIN cherychat_users u2
+                    ON u2.id = c.user_two_id
+
+                LEFT JOIN LATERAL (
+                    SELECT
+                        m.message_text,
+                        m.created_at,
+                        m.sender_id
+                    FROM cherychat_messages m
+                    WHERE m.conversation_id = c.id
+                    ORDER BY
+                        m.created_at DESC,
+                        m.id DESC
+                    LIMIT 1
+                ) lm ON TRUE
+
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) AS unread_count
+                    FROM cherychat_messages m
+                    WHERE m.conversation_id = c.id
+                      AND m.sender_id <> $1
+                      AND m.is_read = FALSE
+                ) unread ON TRUE
+
+                WHERE
+                    c.user_one_id = $1
+                    OR c.user_two_id = $1
+
+                ORDER BY
+                    COALESCE(
+                        lm.created_at,
+                        c.created_at
+                    ) DESC
+
+                `,
+                [
+                    userId
+                ]
+            );
+
+
+        res.json({
+
+            success: true,
+
+            conversations:
+                result.rows.map(chat => ({
+
+                    conversationId:
+                        chat.conversation_id,
+
+                    otherUser: {
+
+                        id:
+                            chat.other_user_id,
+
+                        fullName:
+                            chat.other_user_name,
+
+                        email:
+                            chat.other_user_email,
+
+                        profilePicture:
+                            chat.other_user_picture,
+
+                        about:
+                            chat.other_user_about,
+
+                        isOnline:
+                            chat.other_user_online,
+
+                        lastSeen:
+                            chat.other_user_last_seen
+
+                    },
+
+                    lastMessage:
+                        chat.last_message || "",
+
+                    lastMessageTime:
+                        chat.last_message_time ||
+                        chat.conversation_created_at,
+
+                    lastMessageSenderId:
+                        chat.last_message_sender_id,
+
+                    unreadCount:
+                        Number(chat.unread_count)
+
+                }))
+
+        });
+
+
+    } catch (error) {
+
+        console.error(
+            "VIBECHAT CONVERSATIONS LIST ERROR:",
+            error
+        );
+
+
+        res.status(500).json({
+
+            success: false,
+
+            message:
+                "Unable to load conversations"
 
         });
 
@@ -814,7 +1044,7 @@ app.post("/api/conversations", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "CHERYCHAT CONVERSATION ERROR:",
+            "VIBECHAT CONVERSATION ERROR:",
             error
         );
 
@@ -1007,7 +1237,7 @@ app.post("/api/messages", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "CHERYCHAT SEND MESSAGE ERROR:",
+            "VIBECHAT SEND MESSAGE ERROR:",
             error
         );
 
@@ -1163,7 +1393,7 @@ app.get("/api/messages/:conversationId", async (req, res) => {
     } catch (error) {
 
         console.error(
-            "CHERYCHAT GET MESSAGES ERROR:",
+            "VIBECHAT GET MESSAGES ERROR:",
             error
         );
 
@@ -1294,11 +1524,10 @@ app.post("/api/messages/read", async (req, res) => {
 
         });
 
-
     } catch (error) {
 
         console.error(
-            "CHERYCHAT READ MESSAGE ERROR:",
+            "VIBECHAT READ MESSAGE ERROR:",
             error
         );
 
@@ -1328,7 +1557,7 @@ const PORT =
 app.listen(PORT, async () => {
 
     console.log(
-        `CheryChat backend running on port ${PORT}`
+        `VibeChat backend running on port ${PORT}`
     );
 
     await initializeDatabase();
