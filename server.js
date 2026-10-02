@@ -11,9 +11,10 @@ app.use(express.json({ limit: "10mb" }));
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: process.env.NODE_ENV === "production"
-        ? { rejectUnauthorized: false }
-        : false
+    ssl:
+        process.env.NODE_ENV === "production"
+            ? { rejectUnauthorized: false }
+            : false
 });
 
 /* =========================================================
@@ -25,8 +26,8 @@ function toId(value) {
     return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-function cleanText(value, maxLength = 1000) {
-    return String(value ?? "").trim().slice(0, maxLength);
+function cleanText(value, max = 1000) {
+    return String(value || "").trim().slice(0, max);
 }
 
 function cleanGroupName(value) {
@@ -34,16 +35,24 @@ function cleanGroupName(value) {
 }
 
 function cleanDescription(value) {
-    return cleanText(value, 1000);
+    return cleanText(value, 500);
 }
 
 function generateInviteCode() {
-    return crypto.randomBytes(6).toString("hex").toUpperCase();
+    return crypto.randomBytes(5).toString("hex").toUpperCase();
+}
+
+function createAvatar(name) {
+    return (
+        "https://ui-avatars.com/api/?name=" +
+        encodeURIComponent(name || "User") +
+        "&background=241538&color=ffd54a&bold=true"
+    );
 }
 
 async function userExists(userId) {
     const result = await pool.query(
-        `SELECT id FROM cherychat_users WHERE id = $1 LIMIT 1`,
+        "SELECT id FROM cherychat_users WHERE id = $1",
         [userId]
     );
 
@@ -52,15 +61,7 @@ async function userExists(userId) {
 
 async function getGroup(groupId) {
     const result = await pool.query(
-        `
-        SELECT
-            g.*,
-            u.full_name AS owner_name
-        FROM cherychat_groups g
-        JOIN cherychat_users u ON u.id = g.owner_id
-        WHERE g.id = $1
-        LIMIT 1
-        `,
+        "SELECT * FROM cherychat_groups WHERE id = $1",
         [groupId]
     );
 
@@ -73,8 +74,7 @@ async function getMembership(groupId, userId) {
         SELECT *
         FROM cherychat_group_members
         WHERE group_id = $1
-          AND user_id = $2
-        LIMIT 1
+        AND user_id = $2
         `,
         [groupId, userId]
     );
@@ -83,380 +83,219 @@ async function getMembership(groupId, userId) {
 }
 
 async function isActiveMember(groupId, userId) {
-    const member = await getMembership(groupId, userId);
-
-    return !!(
-        member &&
-        member.membership_status === "active"
+    const result = await pool.query(
+        `
+        SELECT id
+        FROM cherychat_group_members
+        WHERE group_id = $1
+        AND user_id = $2
+        AND status = 'active'
+        `,
+        [groupId, userId]
     );
+
+    return result.rows.length > 0;
 }
 
 async function isAdminOrOwner(groupId, userId) {
-    const member = await getMembership(groupId, userId);
-
-    return !!(
-        member &&
-        member.membership_status === "active" &&
-        (
-            member.role === "owner" ||
-            member.role === "admin"
-        )
+    const result = await pool.query(
+        `
+        SELECT role
+        FROM cherychat_group_members
+        WHERE group_id = $1
+        AND user_id = $2
+        AND status = 'active'
+        `,
+        [groupId, userId]
     );
+
+    if (!result.rows.length) return false;
+
+    return ["owner", "admin"].includes(result.rows[0].role);
 }
 
-function formatGroup(group, extra = {}) {
+function formatUser(row) {
+    if (!row) return null;
+
     return {
-        id: group.id,
-        name: group.name,
-        description: group.description || "",
-        groupPicture: group.group_picture || null,
-        privacy: group.privacy,
-        joiningFee: Number(group.joining_fee || 0),
-        ownerId: group.owner_id,
-        ownerName: group.owner_name || null,
-        inviteCode: group.invite_code,
-        createdAt: group.created_at,
-        updatedAt: group.updated_at,
-        ...extra
+        id: row.id,
+        fullName: row.full_name,
+        full_name: row.full_name,
+        email: row.email,
+        phone: row.phone,
+        profilePicture:
+            row.profile_picture || createAvatar(row.full_name),
+        profile_picture:
+            row.profile_picture || createAvatar(row.full_name),
+        about: row.about || "Hey there! I am using VibeChat.",
+        isOnline: !!row.is_online,
+        is_online: !!row.is_online,
+        lastSeen: row.last_seen,
+        last_seen: row.last_seen,
+        createdAt: row.created_at
+    };
+}
+
+function formatGroup(row) {
+    if (!row) return null;
+
+    return {
+        id: row.id,
+        name: row.name,
+        description: row.description || "",
+        groupType: row.group_type,
+        group_type: row.group_type,
+        visibility: row.visibility,
+        inviteCode: row.invite_code,
+        invite_code: row.invite_code,
+        ownerId: row.owner_id,
+        owner_id: row.owner_id,
+        createdAt: row.created_at
     };
 }
 
 /* =========================================================
-   DATABASE
+   DATABASE INITIALIZATION
 ========================================================= */
 
 async function initializeDatabase() {
-    try {
-        /* USERS */
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_users (
-                id SERIAL PRIMARY KEY,
-                full_name VARCHAR(100) NOT NULL,
-                email VARCHAR(255) UNIQUE NOT NULL,
-                phone VARCHAR(30) UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                profile_picture TEXT,
-                about TEXT DEFAULT 'Hey there! I am using VibeChat.',
-                is_online BOOLEAN DEFAULT FALSE,
-                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        /* PRIVATE CONVERSATIONS */
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_conversations (
-                id SERIAL PRIMARY KEY,
-
-                user_one_id INTEGER NOT NULL
-                    REFERENCES cherychat_users(id)
-                    ON DELETE CASCADE,
-
-                user_two_id INTEGER NOT NULL
-                    REFERENCES cherychat_users(id)
-                    ON DELETE CASCADE,
-
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-                CONSTRAINT different_users
-                    CHECK (user_one_id <> user_two_id),
-
-                CONSTRAINT unique_conversation
-                    UNIQUE (user_one_id, user_two_id)
-            );
-        `);
-
-        /* PRIVATE MESSAGES */
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_messages (
-                id SERIAL PRIMARY KEY,
-
-                conversation_id INTEGER NOT NULL
-                    REFERENCES cherychat_conversations(id)
-                    ON DELETE CASCADE,
-
-                sender_id INTEGER NOT NULL
-                    REFERENCES cherychat_users(id)
-                    ON DELETE CASCADE,
-
-                message_text TEXT NOT NULL,
-
-                is_read BOOLEAN DEFAULT FALSE,
-
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS
-            cherychat_messages_conversation_idx
-            ON cherychat_messages(conversation_id, created_at);
-        `);
-
-        /* =====================================================
-           GROUPS
-        ===================================================== */
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_groups (
-                id SERIAL PRIMARY KEY,
-
-                name VARCHAR(100) NOT NULL,
-
-                description TEXT DEFAULT '',
-
-                group_picture TEXT,
-
-                privacy VARCHAR(20) NOT NULL DEFAULT 'public'
-                    CHECK (privacy IN ('public', 'private')),
-
-                joining_fee NUMERIC(12,2) NOT NULL DEFAULT 0
-                    CHECK (joining_fee >= 0),
-
-                owner_id INTEGER NOT NULL
-                    REFERENCES cherychat_users(id)
-                    ON DELETE CASCADE,
-
-                invite_code VARCHAR(30) UNIQUE NOT NULL,
-
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_group_members (
-                id SERIAL PRIMARY KEY,
-
-                group_id INTEGER NOT NULL
-                    REFERENCES cherychat_groups(id)
-                    ON DELETE CASCADE,
-
-                user_id INTEGER NOT NULL
-                    REFERENCES cherychat_users(id)
-                    ON DELETE CASCADE,
-
-                role VARCHAR(20) NOT NULL DEFAULT 'member'
-                    CHECK (role IN ('owner', 'admin', 'member')),
-
-                membership_status VARCHAR(20) NOT NULL DEFAULT 'active'
-                    CHECK (
-                        membership_status IN
-                        ('active', 'pending', 'removed')
-                    ),
-
-                payment_status VARCHAR(20) NOT NULL DEFAULT 'not_required'
-                    CHECK (
-                        payment_status IN
-                        (
-                            'not_required',
-                            'pending',
-                            'paid',
-                            'failed'
-                        )
-                    ),
-
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-                UNIQUE(group_id, user_id)
-            );
-        `);
-
-        /*
-           PRIVATE GROUP JOIN REQUESTS
-
-           This is the important addition missing from the
-           previous version.
-        */
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_group_join_requests (
-                id SERIAL PRIMARY KEY,
-
-                group_id INTEGER NOT NULL
-                    REFERENCES cherychat_groups(id)
-                    ON DELETE CASCADE,
-
-                user_id INTEGER NOT NULL
-                    REFERENCES cherychat_users(id)
-                    ON DELETE CASCADE,
-
-                status VARCHAR(20) NOT NULL DEFAULT 'pending'
-                    CHECK (
-                        status IN
-                        ('pending', 'approved', 'rejected')
-                    ),
-
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-                UNIQUE(group_id, user_id)
-            );
-        `);
-
-        /* GROUP MESSAGES */
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_group_messages (
-                id SERIAL PRIMARY KEY,
-
-                group_id INTEGER NOT NULL
-                    REFERENCES cherychat_groups(id)
-                    ON DELETE CASCADE,
-
-                sender_id INTEGER NOT NULL
-                    REFERENCES cherychat_users(id)
-                    ON DELETE CASCADE,
-
-                message_text TEXT NOT NULL,
-
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
-
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS
-            cherychat_group_messages_idx
-            ON cherychat_group_messages(group_id, created_at);
-        `);
-
-        /* GROUP PAYMENTS
-           Kept for future payment integration.
-           No payment provider is connected.
-        */
-
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_group_payments (
-                id SERIAL PRIMARY KEY,
-
-                group_id INTEGER NOT NULL
-                    REFERENCES cherychat_groups(id)
-                    ON DELETE CASCADE,
-
-                user_id INTEGER NOT NULL
-                    REFERENCES cherychat_users(id)
-                    ON DELETE CASCADE,
-
-                amount NUMERIC(12,2) NOT NULL
-                    CHECK (amount >= 0),
-
-                currency VARCHAR(10) NOT NULL DEFAULT 'KES',
-
-                provider VARCHAR(30) DEFAULT 'pending',
-
-                provider_reference TEXT,
-
-                status VARCHAR(20) NOT NULL DEFAULT 'pending'
-                    CHECK (
-                        status IN
-                        ('pending', 'paid', 'failed', 'cancelled')
-                    ),
-
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-                paid_at TIMESTAMP
-            );
-        `);
-
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS
-            cherychat_group_members_group_idx
-            ON cherychat_group_members(group_id);
-        `);
-
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS
-            cherychat_group_members_user_idx
-            ON cherychat_group_members(user_id);
-        `);
-
-        await pool.query(`
-            CREATE INDEX IF NOT EXISTS
-            cherychat_group_requests_group_idx
-            ON cherychat_group_join_requests(group_id, status);
-        `);
-
-        console.log("VibeChat database ready");
-        console.log("VibeChat groups database ready");
-        console.log("VibeChat private-group requests database ready");
-
-    } catch (error) {
-        console.error(
-            "DATABASE INITIALIZATION ERROR:",
-            error
-        );
-
-        throw error;
-    }
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_users (
+            id SERIAL PRIMARY KEY,
+            full_name VARCHAR(100) NOT NULL,
+            email VARCHAR(255) UNIQUE NOT NULL,
+            phone VARCHAR(30) UNIQUE NOT NULL,
+            password_hash TEXT NOT NULL,
+            profile_picture TEXT,
+            about TEXT DEFAULT 'Hey there! I am using VibeChat.',
+            is_online BOOLEAN DEFAULT FALSE,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_conversations (
+            id SERIAL PRIMARY KEY,
+            user_one INTEGER NOT NULL REFERENCES cherychat_users(id) ON DELETE CASCADE,
+            user_two INTEGER NOT NULL REFERENCES cherychat_users(id) ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(user_one, user_two),
+            CHECK(user_one <> user_two)
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_messages (
+            id SERIAL PRIMARY KEY,
+            conversation_id INTEGER NOT NULL
+                REFERENCES cherychat_conversations(id)
+                ON DELETE CASCADE,
+            sender_id INTEGER NOT NULL
+                REFERENCES cherychat_users(id)
+                ON DELETE CASCADE,
+            message_text TEXT NOT NULL,
+            is_read BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_groups (
+            id SERIAL PRIMARY KEY,
+            name VARCHAR(100) NOT NULL,
+            description TEXT DEFAULT '',
+            group_type VARCHAR(20) DEFAULT 'public',
+            visibility VARCHAR(20) DEFAULT 'public',
+            invite_code VARCHAR(30) UNIQUE NOT NULL,
+            owner_id INTEGER NOT NULL
+                REFERENCES cherychat_users(id)
+                ON DELETE CASCADE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_group_members (
+            id SERIAL PRIMARY KEY,
+            group_id INTEGER NOT NULL
+                REFERENCES cherychat_groups(id)
+                ON DELETE CASCADE,
+            user_id INTEGER NOT NULL
+                REFERENCES cherychat_users(id)
+                ON DELETE CASCADE,
+            role VARCHAR(20) DEFAULT 'member',
+            status VARCHAR(20) DEFAULT 'active',
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(group_id, user_id)
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_group_join_requests (
+            id SERIAL PRIMARY KEY,
+            group_id INTEGER NOT NULL
+                REFERENCES cherychat_groups(id)
+                ON DELETE CASCADE,
+            user_id INTEGER NOT NULL
+                REFERENCES cherychat_users(id)
+                ON DELETE CASCADE,
+            status VARCHAR(20) DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(group_id, user_id)
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_group_messages (
+            id SERIAL PRIMARY KEY,
+            group_id INTEGER NOT NULL
+                REFERENCES cherychat_groups(id)
+                ON DELETE CASCADE,
+            sender_id INTEGER NOT NULL
+                REFERENCES cherychat_users(id)
+                ON DELETE CASCADE,
+            message_text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_group_payments (
+            id SERIAL PRIMARY KEY,
+            group_id INTEGER NOT NULL
+                REFERENCES cherychat_groups(id)
+                ON DELETE CASCADE,
+            user_id INTEGER NOT NULL
+                REFERENCES cherychat_users(id)
+                ON DELETE CASCADE,
+            amount NUMERIC(12,2) DEFAULT 0,
+            reference VARCHAR(100),
+            status VARCHAR(30) DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    `);
+
+    console.log("VibeChat database ready.");
 }
 
 /* =========================================================
-   HOME
+   ROOT
 ========================================================= */
 
 app.get("/", (req, res) => {
     res.json({
         success: true,
-        message: "VibeChat Backend is running",
-        status: "online",
-        database: "connected"
+        app: "VibeChat",
+        message: "VibeChat backend is running."
     });
 });
 
-/* =========================================================
-   TEST DATABASE
-========================================================= */
-
-app.get("/api/test-db", async (req, res) => {
-    try {
-        const result = await pool.query("SELECT NOW()");
-
-        res.json({
-            success: true,
-            message: "VibeChat database connected successfully",
-            time: result.rows[0].now
-        });
-
-    } catch (error) {
-        console.error("DATABASE TEST ERROR:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Database connection failed"
-        });
-    }
-});
-
-/* =========================================================
-   TEST USERS
-========================================================= */
-
-app.get("/api/test-users", async (req, res) => {
-    try {
-        const result = await pool.query(`
-            SELECT COUNT(*) AS total_users
-            FROM cherychat_users
-        `);
-
-        res.json({
-            success: true,
-            message: "VibeChat users table is working",
-            total_users: Number(result.rows[0].total_users)
-        });
-
-    } catch (error) {
-        console.error("USERS TABLE ERROR:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "VibeChat users table is not available"
-        });
-    }
+app.get("/api/test", (req, res) => {
+    res.json({
+        success: true,
+        message: "VibeChat API is working."
+    });
 });
 
 /* =========================================================
@@ -465,74 +304,43 @@ app.get("/api/test-users", async (req, res) => {
 
 app.post("/api/register", async (req, res) => {
     try {
-        const {
-            fullName,
-            email,
-            phone,
-            password
-        } = req.body;
+        const fullName = cleanText(req.body.fullName || req.body.full_name, 100);
+        const email = cleanText(req.body.email, 255).toLowerCase();
+        const phone = cleanText(req.body.phone, 30);
+        const password = String(req.body.password || "");
 
         if (!fullName || !email || !phone || !password) {
             return res.status(400).json({
                 success: false,
-                message: "All fields are required"
+                message: "Please fill in all required fields."
             });
         }
 
-        const cleanName = String(fullName).trim();
-        const cleanEmail = String(email).trim().toLowerCase();
-        const cleanPhone = String(phone).trim();
-        const cleanPassword = String(password);
-
-        if (cleanName.length < 2) {
+        if (password.length < 6) {
             return res.status(400).json({
                 success: false,
-                message: "Please enter a valid full name"
+                message: "Password must be at least 6 characters."
             });
         }
 
-        if (cleanPassword.length < 6) {
-            return res.status(400).json({
-                success: false,
-                message: "Password must be at least 6 characters"
-            });
-        }
-
-        const existingUser = await pool.query(
+        const existing = await pool.query(
             `
-            SELECT id, email, phone
+            SELECT id
             FROM cherychat_users
             WHERE LOWER(email) = LOWER($1)
-               OR phone = $2
-            LIMIT 1
+            OR phone = $2
             `,
-            [cleanEmail, cleanPhone]
+            [email, phone]
         );
 
-        if (existingUser.rows.length > 0) {
-            const existing = existingUser.rows[0];
-
-            if (existing.email.toLowerCase() === cleanEmail) {
-                return res.status(409).json({
-                    success: false,
-                    message:
-                        "That email address is already registered on VibeChat"
-                });
-            }
-
-            if (existing.phone === cleanPhone) {
-                return res.status(409).json({
-                    success: false,
-                    message:
-                        "That phone number is already registered on VibeChat"
-                });
-            }
+        if (existing.rows.length) {
+            return res.status(409).json({
+                success: false,
+                message: "Email or phone number is already registered."
+            });
         }
 
-        const passwordHash = await bcrypt.hash(
-            cleanPassword,
-            12
-        );
+        const passwordHash = await bcrypt.hash(password, 10);
 
         const result = await pool.query(
             `
@@ -541,49 +349,44 @@ app.post("/api/register", async (req, res) => {
                 full_name,
                 email,
                 phone,
-                password_hash
+                password_hash,
+                about,
+                is_online
             )
-            VALUES ($1, $2, $3, $4)
+            VALUES ($1, $2, $3, $4, $5, FALSE)
             RETURNING
                 id,
                 full_name,
                 email,
                 phone,
+                profile_picture,
                 about,
+                is_online,
+                last_seen,
                 created_at
             `,
             [
-                cleanName,
-                cleanEmail,
-                cleanPhone,
-                passwordHash
+                fullName,
+                email,
+                phone,
+                passwordHash,
+                "Hey there! I am using VibeChat."
             ]
         );
 
-        const user = result.rows[0];
+        const user = formatUser(result.rows[0]);
 
         res.status(201).json({
             success: true,
-            message: "VibeChat account created successfully",
-            user: {
-                id: user.id,
-                fullName: user.full_name,
-                email: user.email,
-                phone: user.phone,
-                about: user.about,
-                createdAt: user.created_at
-            }
+            message: "Registration successful.",
+            user
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT REGISTRATION ERROR:",
-            error
-        );
+        console.error("REGISTER ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to create VibeChat account"
+            message: "Unable to register user."
         });
     }
 });
@@ -594,208 +397,77 @@ app.post("/api/register", async (req, res) => {
 
 app.post("/api/login", async (req, res) => {
     try {
-        const {
-            identifier,
-            password
-        } = req.body;
+        const identifier = cleanText(
+            req.body.email ||
+            req.body.phone ||
+            req.body.identifier,
+            255
+        );
+
+        const password = String(req.body.password || "");
 
         if (!identifier || !password) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Email/phone and password are required"
+                message: "Enter your email/phone and password."
             });
         }
-
-        const cleanIdentifier =
-            String(identifier).trim();
 
         const result = await pool.query(
             `
-            SELECT
-                id,
-                full_name,
-                email,
-                phone,
-                password_hash,
-                profile_picture,
-                about,
-                is_online,
-                last_seen,
-                created_at
+            SELECT *
             FROM cherychat_users
             WHERE LOWER(email) = LOWER($1)
-               OR phone = $1
+            OR phone = $1
             LIMIT 1
             `,
-            [cleanIdentifier]
+            [identifier]
         );
 
-        if (result.rows.length === 0) {
+        if (!result.rows.length) {
             return res.status(401).json({
                 success: false,
-                message:
-                    "Incorrect email, phone number or password"
+                message: "Invalid login details."
             });
         }
 
-        const user = result.rows[0];
+        const userRow = result.rows[0];
 
-        const passwordMatch = await bcrypt.compare(
-            String(password),
-            user.password_hash
+        const validPassword = await bcrypt.compare(
+            password,
+            userRow.password_hash
         );
 
-        if (!passwordMatch) {
+        if (!validPassword) {
             return res.status(401).json({
                 success: false,
-                message:
-                    "Incorrect email, phone number or password"
+                message: "Invalid login details."
             });
         }
 
         await pool.query(
             `
             UPDATE cherychat_users
-            SET
-                is_online = TRUE,
+            SET is_online = TRUE,
                 last_seen = CURRENT_TIMESTAMP
             WHERE id = $1
             `,
-            [user.id]
+            [userRow.id]
         );
+
+        userRow.is_online = true;
 
         res.json({
             success: true,
-            message: "Login successful",
-            user: {
-                id: user.id,
-                fullName: user.full_name,
-                email: user.email,
-                phone: user.phone,
-                profilePicture: user.profile_picture,
-                about: user.about,
-                isOnline: true,
-                lastSeen: new Date(),
-                createdAt: user.created_at
-            }
+            message: "Login successful.",
+            user: formatUser(userRow)
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT LOGIN ERROR:",
-            error
-        );
+        console.error("LOGIN ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to login"
-        });
-    }
-});
-
-/* =========================================================
-   ONLINE HEARTBEAT
-========================================================= */
-
-app.post("/api/users/heartbeat", async (req, res) => {
-    try {
-        const userId = toId(req.body.userId);
-
-        if (!userId) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user ID is required"
-            });
-        }
-
-        const result = await pool.query(
-            `
-            UPDATE cherychat_users
-            SET
-                is_online = TRUE,
-                last_seen = CURRENT_TIMESTAMP
-            WHERE id = $1
-            RETURNING id, is_online, last_seen
-            `,
-            [userId]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "User not found"
-            });
-        }
-
-        res.json({
-            success: true,
-            isOnline: result.rows[0].is_online,
-            lastSeen: result.rows[0].last_seen
-        });
-
-    } catch (error) {
-        console.error(
-            "VIBECHAT HEARTBEAT ERROR:",
-            error
-        );
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to update online status"
-        });
-    }
-});
-
-/* =========================================================
-   OFFLINE STATUS
-========================================================= */
-
-app.post("/api/users/logout-status", async (req, res) => {
-    try {
-        const userId = toId(req.body.userId);
-
-        if (!userId) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user ID is required"
-            });
-        }
-
-        const result = await pool.query(
-            `
-            UPDATE cherychat_users
-            SET
-                is_online = FALSE,
-                last_seen = CURRENT_TIMESTAMP
-            WHERE id = $1
-            RETURNING id, is_online, last_seen
-            `,
-            [userId]
-        );
-
-        if (result.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "User not found"
-            });
-        }
-
-        res.json({
-            success: true,
-            isOnline: result.rows[0].is_online,
-            lastSeen: result.rows[0].last_seen
-        });
-
-    } catch (error) {
-        console.error(
-            "VIBECHAT OFFLINE STATUS ERROR:",
-            error
-        );
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to update offline status"
+            message: "Unable to login."
         });
     }
 });
@@ -804,14 +476,252 @@ app.post("/api/users/logout-status", async (req, res) => {
    USER STATUS
 ========================================================= */
 
-app.get("/api/users/:id/status", async (req, res) => {
+app.put("/api/users/:id/online", async (req, res) => {
     try {
         const userId = toId(req.params.id);
 
         if (!userId) {
             return res.status(400).json({
                 success: false,
-                message: "Valid user ID is required"
+                message: "Invalid user ID."
+            });
+        }
+
+        await pool.query(
+            `
+            UPDATE cherychat_users
+            SET is_online = TRUE,
+                last_seen = CURRENT_TIMESTAMP
+            WHERE id = $1
+            `,
+            [userId]
+        );
+
+        res.json({
+            success: true
+        });
+    } catch (error) {
+        console.error("ONLINE ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to update online status."
+        });
+    }
+});
+
+app.put("/api/users/:id/offline", async (req, res) => {
+    try {
+        const userId = toId(req.params.id);
+
+        if (!userId) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid user ID."
+            });
+        }
+
+        await pool.query(
+            `
+            UPDATE cherychat_users
+            SET is_online = FALSE,
+                last_seen = CURRENT_TIMESTAMP
+            WHERE id = $1
+            `,
+            [userId]
+        );
+
+        res.json({
+            success: true
+        });
+    } catch (error) {
+        console.error("OFFLINE ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to update offline status."
+        });
+    }
+});
+
+/* =========================================================
+   UPDATE PROFILE PICTURE
+========================================================= */
+
+app.put("/api/users/:id/profile-picture", async (req, res) => {
+    try {
+        const userId = toId(req.params.id);
+
+        const profilePicture = String(
+            req.body.profilePicture || ""
+        ).trim();
+
+        if (!userId) {
+            return res.status(400).json({
+                success: false,
+                message: "Valid user ID is required."
+            });
+        }
+
+        if (!profilePicture) {
+            return res.status(400).json({
+                success: false,
+                message: "Profile picture is required."
+            });
+        }
+
+        const imagePattern =
+            /^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=\s]+$/i;
+
+        if (!imagePattern.test(profilePicture)) {
+            return res.status(400).json({
+                success: false,
+                message: "Please upload a valid JPG, PNG or WEBP image."
+            });
+        }
+
+        const base64Part =
+            profilePicture.split(",")[1] || "";
+
+        const estimatedBytes =
+            Math.ceil((base64Part.length * 3) / 4);
+
+        const maxBytes = 2 * 1024 * 1024;
+
+        if (estimatedBytes > maxBytes) {
+            return res.status(400).json({
+                success: false,
+                message: "Profile picture must be 2MB or smaller."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            UPDATE cherychat_users
+            SET profile_picture = $1
+            WHERE id = $2
+            RETURNING
+                id,
+                full_name,
+                email,
+                phone,
+                profile_picture,
+                about,
+                is_online,
+                last_seen,
+                created_at
+            `,
+            [profilePicture, userId]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found."
+            });
+        }
+
+        res.json({
+            success: true,
+            message: "Profile picture updated successfully.",
+            user: formatUser(result.rows[0])
+        });
+    } catch (error) {
+        console.error(
+            "VIBECHAT PROFILE PICTURE UPDATE ERROR:",
+            error
+        );
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to update profile picture."
+        });
+    }
+});
+
+/* =========================================================
+   UPDATE PROFILE
+========================================================= */
+
+app.put("/api/users/:id/profile", async (req, res) => {
+    try {
+        const userId = toId(req.params.id);
+
+        const fullName = cleanText(
+            req.body.fullName || req.body.full_name,
+            100
+        );
+
+        const about = cleanText(
+            req.body.about,
+            300
+        );
+
+        if (!userId || !fullName) {
+            return res.status(400).json({
+                success: false,
+                message: "Name is required."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            UPDATE cherychat_users
+            SET full_name = $1,
+                about = $2
+            WHERE id = $3
+            RETURNING
+                id,
+                full_name,
+                email,
+                phone,
+                profile_picture,
+                about,
+                is_online,
+                last_seen,
+                created_at
+            `,
+            [
+                fullName,
+                about || "Hey there! I am using VibeChat.",
+                userId
+            ]
+        );
+
+        if (!result.rows.length) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found."
+            });
+        }
+
+        res.json({
+            success: true,
+            message: "Profile updated successfully.",
+            user: formatUser(result.rows[0])
+        });
+    } catch (error) {
+        console.error("PROFILE UPDATE ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to update profile."
+        });
+    }
+});
+
+/* =========================================================
+   GET USER
+========================================================= */
+
+app.get("/api/users/:id", async (req, res) => {
+    try {
+        const userId = toId(req.params.id);
+
+        if (!userId) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid user ID."
             });
         }
 
@@ -820,43 +730,36 @@ app.get("/api/users/:id/status", async (req, res) => {
             SELECT
                 id,
                 full_name,
+                email,
+                phone,
+                profile_picture,
+                about,
                 is_online,
-                last_seen
+                last_seen,
+                created_at
             FROM cherychat_users
             WHERE id = $1
-            LIMIT 1
             `,
             [userId]
         );
 
-        if (result.rows.length === 0) {
+        if (!result.rows.length) {
             return res.status(404).json({
                 success: false,
-                message: "User not found"
+                message: "User not found."
             });
         }
 
-        const user = result.rows[0];
-
         res.json({
             success: true,
-            user: {
-                id: user.id,
-                fullName: user.full_name,
-                isOnline: user.is_online,
-                lastSeen: user.last_seen
-            }
+            user: formatUser(result.rows[0])
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT USER STATUS ERROR:",
-            error
-        );
+        console.error("GET USER ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to get user status"
+            message: "Unable to get user."
         });
     }
 });
@@ -867,8 +770,8 @@ app.get("/api/users/:id/status", async (req, res) => {
 
 app.get("/api/users/search", async (req, res) => {
     try {
-        const q =
-            String(req.query.q || "").trim();
+        const q = cleanText(req.query.q, 100);
+        const currentUserId = toId(req.query.userId);
 
         if (!q) {
             return res.json({
@@ -876,8 +779,6 @@ app.get("/api/users/search", async (req, res) => {
                 users: []
             });
         }
-
-        const search = `%${q}%`;
 
         const result = await pool.query(
             `
@@ -892,46 +793,99 @@ app.get("/api/users/search", async (req, res) => {
                 last_seen
             FROM cherychat_users
             WHERE
-                full_name ILIKE $1
-                OR email ILIKE $1
-                OR phone ILIKE $1
+                (
+                    full_name ILIKE $1
+                    OR email ILIKE $1
+                    OR phone ILIKE $1
+                )
+                AND ($2::INTEGER IS NULL OR id <> $2)
             ORDER BY
-                is_online DESC,
+                CASE
+                    WHEN LOWER(full_name) = LOWER($3)
+                    THEN 0
+                    ELSE 1
+                END,
                 full_name ASC
-            LIMIT 20
+            LIMIT 30
             `,
-            [search]
+            [
+                `%${q}%`,
+                currentUserId,
+                q
+            ]
         );
 
         res.json({
             success: true,
-            users: result.rows.map(user => ({
-                id: user.id,
-                fullName: user.full_name,
-                email: user.email,
-                phone: user.phone,
-                profilePicture: user.profile_picture,
-                about: user.about,
-                isOnline: user.is_online,
-                lastSeen: user.last_seen
-            }))
+            users: result.rows.map(formatUser)
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT USER SEARCH ERROR:",
-            error
-        );
+        console.error("SEARCH USERS ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to search VibeChat users"
+            message: "Unable to search users."
         });
     }
 });
 
 /* =========================================================
-   PRIVATE CONVERSATIONS
+   CONVERSATION
+========================================================= */
+
+app.post("/api/conversations", async (req, res) => {
+    try {
+        const userId = toId(req.body.userId);
+        const otherUserId = toId(req.body.otherUserId);
+
+        if (!userId || !otherUserId || userId === otherUserId) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid users."
+            });
+        }
+
+        if (
+            !(await userExists(userId)) ||
+            !(await userExists(otherUserId))
+        ) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found."
+            });
+        }
+
+        const one = Math.min(userId, otherUserId);
+        const two = Math.max(userId, otherUserId);
+
+        const result = await pool.query(
+            `
+            INSERT INTO cherychat_conversations
+            (user_one, user_two)
+            VALUES ($1, $2)
+            ON CONFLICT (user_one, user_two)
+            DO UPDATE SET user_one = EXCLUDED.user_one
+            RETURNING id, user_one, user_two, created_at
+            `,
+            [one, two]
+        );
+
+        res.json({
+            success: true,
+            conversation: result.rows[0]
+        });
+    } catch (error) {
+        console.error("CREATE CONVERSATION ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to create conversation."
+        });
+    }
+});
+
+/* =========================================================
+   GET CONVERSATIONS
 ========================================================= */
 
 app.get("/api/conversations", async (req, res) => {
@@ -941,290 +895,136 @@ app.get("/api/conversations", async (req, res) => {
         if (!userId) {
             return res.status(400).json({
                 success: false,
-                message: "A valid user ID is required"
-            });
-        }
-
-        if (!(await userExists(userId))) {
-            return res.status(404).json({
-                success: false,
-                message: "User not found"
+                message: "Valid user ID is required."
             });
         }
 
         const result = await pool.query(
             `
             SELECT
-                c.id AS conversation_id,
-                c.created_at AS conversation_created_at,
+                c.id,
+                c.created_at,
+                u.id AS other_id,
+                u.full_name AS other_name,
+                u.email AS other_email,
+                u.phone AS other_phone,
+                u.profile_picture AS other_picture,
+                u.about AS other_about,
+                u.is_online AS other_online,
+                u.last_seen AS other_last_seen,
 
-                CASE
-                    WHEN c.user_one_id = $1
-                    THEN u2.id
-                    ELSE u1.id
-                END AS other_user_id,
+                (
+                    SELECT m.message_text
+                    FROM cherychat_messages m
+                    WHERE m.conversation_id = c.id
+                    ORDER BY m.created_at DESC
+                    LIMIT 1
+                ) AS last_message,
 
-                CASE
-                    WHEN c.user_one_id = $1
-                    THEN u2.full_name
-                    ELSE u1.full_name
-                END AS other_user_name,
-
-                CASE
-                    WHEN c.user_one_id = $1
-                    THEN u2.email
-                    ELSE u1.email
-                END AS other_user_email,
-
-                CASE
-                    WHEN c.user_one_id = $1
-                    THEN u2.profile_picture
-                    ELSE u1.profile_picture
-                END AS other_user_picture,
-
-                CASE
-                    WHEN c.user_one_id = $1
-                    THEN u2.about
-                    ELSE u1.about
-                END AS other_user_about,
-
-                CASE
-                    WHEN c.user_one_id = $1
-                    THEN u2.is_online
-                    ELSE u1.is_online
-                END AS other_user_online,
-
-                CASE
-                    WHEN c.user_one_id = $1
-                    THEN u2.last_seen
-                    ELSE u1.last_seen
-                END AS other_user_last_seen,
-
-                lm.message_text AS last_message,
-                lm.created_at AS last_message_time,
-                lm.sender_id AS last_message_sender_id,
-
-                COALESCE(unread.unread_count, 0) AS unread_count
+                (
+                    SELECT m.created_at
+                    FROM cherychat_messages m
+                    WHERE m.conversation_id = c.id
+                    ORDER BY m.created_at DESC
+                    LIMIT 1
+                ) AS last_message_time
 
             FROM cherychat_conversations c
 
-            JOIN cherychat_users u1
-                ON u1.id = c.user_one_id
+            JOIN cherychat_users u
+            ON u.id =
+                CASE
+                    WHEN c.user_one = $1 THEN c.user_two
+                    ELSE c.user_one
+                END
 
-            JOIN cherychat_users u2
-                ON u2.id = c.user_two_id
-
-            LEFT JOIN LATERAL (
-                SELECT
-                    m.message_text,
-                    m.created_at,
-                    m.sender_id
-                FROM cherychat_messages m
-                WHERE m.conversation_id = c.id
-                ORDER BY m.created_at DESC, m.id DESC
-                LIMIT 1
-            ) lm ON TRUE
-
-            LEFT JOIN LATERAL (
-                SELECT COUNT(*) AS unread_count
-                FROM cherychat_messages m
-                WHERE m.conversation_id = c.id
-                  AND m.sender_id <> $1
-                  AND m.is_read = FALSE
-            ) unread ON TRUE
-
-            WHERE
-                c.user_one_id = $1
-                OR c.user_two_id = $1
+            WHERE c.user_one = $1
+            OR c.user_two = $1
 
             ORDER BY
-                COALESCE(lm.created_at, c.created_at) DESC
+                COALESCE(
+                    (
+                        SELECT m.created_at
+                        FROM cherychat_messages m
+                        WHERE m.conversation_id = c.id
+                        ORDER BY m.created_at DESC
+                        LIMIT 1
+                    ),
+                    c.created_at
+                ) DESC
             `,
             [userId]
         );
 
         res.json({
             success: true,
-            conversations: result.rows.map(chat => ({
-                conversationId: chat.conversation_id,
-
+            conversations: result.rows.map(row => ({
+                id: row.id,
                 otherUser: {
-                    id: chat.other_user_id,
-                    fullName: chat.other_user_name,
-                    email: chat.other_user_email,
-                    profilePicture: chat.other_user_picture,
-                    about: chat.other_user_about,
-                    isOnline: chat.other_user_online,
-                    lastSeen: chat.other_user_last_seen
+                    id: row.other_id,
+                    fullName: row.other_name,
+                    full_name: row.other_name,
+                    email: row.other_email,
+                    phone: row.other_phone,
+                    profilePicture:
+                        row.other_picture ||
+                        createAvatar(row.other_name),
+                    profile_picture:
+                        row.other_picture ||
+                        createAvatar(row.other_name),
+                    about: row.other_about,
+                    isOnline: !!row.other_online,
+                    is_online: !!row.other_online,
+                    lastSeen: row.other_last_seen,
+                    last_seen: row.other_last_seen
                 },
-
-                lastMessage: chat.last_message || "",
-
-                lastMessageTime:
-                    chat.last_message_time ||
-                    chat.conversation_created_at,
-
-                lastMessageSenderId:
-                    chat.last_message_sender_id,
-
-                unreadCount:
-                    Number(chat.unread_count)
+                lastMessage: row.last_message || "",
+                lastMessageTime: row.last_message_time
             }))
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT CONVERSATIONS LIST ERROR:",
-            error
-        );
+        console.error("GET CONVERSATIONS ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to load conversations"
+            message: "Unable to load conversations."
         });
     }
 });
 
-app.post("/api/conversations", async (req, res) => {
-    try {
-        const currentUserId = toId(req.body.userId);
-        const targetUserId = toId(req.body.otherUserId);
-
-        if (!currentUserId || !targetUserId) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user IDs are required"
-            });
-        }
-
-        if (currentUserId === targetUserId) {
-            return res.status(400).json({
-                success: false,
-                message:
-                    "You cannot start a conversation with yourself"
-            });
-        }
-
-        const users = await pool.query(
-            `
-            SELECT id
-            FROM cherychat_users
-            WHERE id IN ($1, $2)
-            `,
-            [currentUserId, targetUserId]
-        );
-
-        if (users.rows.length !== 2) {
-            return res.status(404).json({
-                success: false,
-                message:
-                    "One or both users do not exist"
-            });
-        }
-
-        const userOne = Math.min(
-            currentUserId,
-            targetUserId
-        );
-
-        const userTwo = Math.max(
-            currentUserId,
-            targetUserId
-        );
-
-        const result = await pool.query(
-            `
-            INSERT INTO cherychat_conversations
-            (
-                user_one_id,
-                user_two_id
-            )
-            VALUES ($1, $2)
-
-            ON CONFLICT (user_one_id, user_two_id)
-            DO UPDATE SET
-                user_one_id = EXCLUDED.user_one_id
-
-            RETURNING
-                id,
-                user_one_id,
-                user_two_id,
-                created_at
-            `,
-            [userOne, userTwo]
-        );
-
-        res.json({
-            success: true,
-            conversation: {
-                id: result.rows[0].id,
-                userOneId: result.rows[0].user_one_id,
-                userTwoId: result.rows[0].user_two_id,
-                createdAt: result.rows[0].created_at
-            }
-        });
-
-    } catch (error) {
-        console.error(
-            "VIBECHAT CONVERSATION ERROR:",
-            error
-        );
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to start conversation"
-        });
-    }
-});
+/* =========================================================
+   SEND MESSAGE
+========================================================= */
 
 app.post("/api/messages", async (req, res) => {
     try {
-        const conversationId =
-            toId(req.body.conversationId);
+        const senderId = toId(req.body.senderId);
+        const receiverId = toId(req.body.receiverId);
+        const messageText = cleanText(req.body.messageText, 5000);
 
-        const senderId =
-            toId(req.body.senderId);
-
-        const message =
-            cleanText(req.body.message, 5000);
-
-        if (!conversationId || !senderId || !message) {
+        if (!senderId || !receiverId || !messageText) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Conversation ID, sender ID and message are required"
+                message: "Message details are required."
             });
         }
+
+        const one = Math.min(senderId, receiverId);
+        const two = Math.max(senderId, receiverId);
 
         const conversation = await pool.query(
             `
-            SELECT id, user_one_id, user_two_id
-            FROM cherychat_conversations
-            WHERE id = $1
-            LIMIT 1
+            INSERT INTO cherychat_conversations
+            (user_one, user_two)
+            VALUES ($1, $2)
+            ON CONFLICT (user_one, user_two)
+            DO UPDATE SET user_one = EXCLUDED.user_one
+            RETURNING id
             `,
-            [conversationId]
+            [one, two]
         );
 
-        if (conversation.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "Conversation not found"
-            });
-        }
-
-        const chat = conversation.rows[0];
-
-        if (
-            chat.user_one_id !== senderId &&
-            chat.user_two_id !== senderId
-        ) {
-            return res.status(403).json({
-                success: false,
-                message:
-                    "You are not a member of this conversation"
-            });
-        }
+        const conversationId = conversation.rows[0].id;
 
         const result = await pool.query(
             `
@@ -1235,93 +1035,67 @@ app.post("/api/messages", async (req, res) => {
                 message_text
             )
             VALUES ($1, $2, $3)
-            RETURNING
-                id,
-                conversation_id,
-                sender_id,
-                message_text,
-                is_read,
-                created_at
+            RETURNING id, conversation_id, sender_id,
+                      message_text, is_read, created_at
             `,
             [
                 conversationId,
                 senderId,
-                message
+                messageText
             ]
         );
 
-        const saved = result.rows[0];
-
         res.status(201).json({
             success: true,
-            message: {
-                id: saved.id,
-                conversationId: saved.conversation_id,
-                senderId: saved.sender_id,
-                message: saved.message_text,
-                isRead: saved.is_read,
-                createdAt: saved.created_at
-            }
+            message: result.rows[0]
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT SEND MESSAGE ERROR:",
-            error
-        );
+        console.error("SEND MESSAGE ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to send message"
+            message: "Unable to send message."
         });
     }
 });
 
+/* =========================================================
+   GET MESSAGES
+========================================================= */
+
 app.get("/api/messages", async (req, res) => {
     try {
-        const conversationId =
-            toId(req.query.conversationId);
+        const userId = toId(req.query.userId);
+        const otherUserId = toId(req.query.otherUserId);
 
-        const userId =
-            toId(req.query.userId);
-
-        if (!conversationId || !userId) {
+        if (!userId || !otherUserId) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Valid conversation ID and user ID are required"
+                message: "Invalid users."
             });
         }
+
+        const one = Math.min(userId, otherUserId);
+        const two = Math.max(userId, otherUserId);
 
         const conversation = await pool.query(
             `
-            SELECT user_one_id, user_two_id
+            SELECT id
             FROM cherychat_conversations
-            WHERE id = $1
-            LIMIT 1
+            WHERE user_one = $1
+            AND user_two = $2
             `,
-            [conversationId]
+            [one, two]
         );
 
-        if (conversation.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "Conversation not found"
+        if (!conversation.rows.length) {
+            return res.json({
+                success: true,
+                messages: []
             });
         }
 
-        const chat = conversation.rows[0];
-
-        if (
-            chat.user_one_id !== userId &&
-            chat.user_two_id !== userId
-        ) {
-            return res.status(403).json({
-                success: false,
-                message:
-                    "You are not a member of this conversation"
-            });
-        }
+        const conversationId = conversation.rows[0].id;
 
         const result = await pool.query(
             `
@@ -1329,96 +1103,77 @@ app.get("/api/messages", async (req, res) => {
                 m.id,
                 m.conversation_id,
                 m.sender_id,
-                u.full_name AS sender_name,
-                u.profile_picture AS sender_picture,
                 m.message_text,
                 m.is_read,
-                m.created_at
-
+                m.created_at,
+                u.full_name AS sender_name,
+                u.profile_picture AS sender_picture
             FROM cherychat_messages m
-
             JOIN cherychat_users u
-                ON u.id = m.sender_id
-
+            ON u.id = m.sender_id
             WHERE m.conversation_id = $1
-
-            ORDER BY
-                m.created_at ASC,
-                m.id ASC
+            ORDER BY m.created_at ASC
             `,
             [conversationId]
         );
 
         res.json({
             success: true,
-            messages: result.rows.map(message => ({
-                id: message.id,
-                conversationId: message.conversation_id,
-                senderId: message.sender_id,
-                senderName: message.sender_name,
-                senderPicture: message.sender_picture,
-                message: message.message_text,
-                isRead: message.is_read,
-                createdAt: message.created_at
+            conversationId,
+            messages: result.rows.map(row => ({
+                id: row.id,
+                conversationId: row.conversation_id,
+                senderId: row.sender_id,
+                senderName: row.sender_name,
+                senderPicture:
+                    row.sender_picture ||
+                    createAvatar(row.sender_name),
+                messageText: row.message_text,
+                isRead: row.is_read,
+                createdAt: row.created_at
             }))
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT GET MESSAGES ERROR:",
-            error
-        );
+        console.error("GET MESSAGES ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to load messages"
+            message: "Unable to load messages."
         });
     }
 });
 
-app.post("/api/messages/read", async (req, res) => {
+/* =========================================================
+   MARK MESSAGES READ
+========================================================= */
+
+app.put("/api/messages/read", async (req, res) => {
     try {
-        const conversationId =
-            toId(req.body.conversationId);
+        const userId = toId(req.body.userId);
+        const otherUserId = toId(req.body.otherUserId);
 
-        const userId =
-            toId(req.body.userId);
-
-        if (!conversationId || !userId) {
+        if (!userId || !otherUserId) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Valid conversation ID and user ID are required"
+                message: "Invalid users."
             });
         }
+
+        const one = Math.min(userId, otherUserId);
+        const two = Math.max(userId, otherUserId);
 
         const conversation = await pool.query(
             `
-            SELECT user_one_id, user_two_id
+            SELECT id
             FROM cherychat_conversations
-            WHERE id = $1
+            WHERE user_one = $1
+            AND user_two = $2
             `,
-            [conversationId]
+            [one, two]
         );
 
-        if (conversation.rows.length === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "Conversation not found"
-            });
-        }
-
-        const chat = conversation.rows[0];
-
-        if (
-            chat.user_one_id !== userId &&
-            chat.user_two_id !== userId
-        ) {
-            return res.status(403).json({
-                success: false,
-                message:
-                    "You are not a member of this conversation"
-            });
+        if (!conversation.rows.length) {
+            return res.json({ success: true });
         }
 
         await pool.query(
@@ -1426,538 +1181,305 @@ app.post("/api/messages/read", async (req, res) => {
             UPDATE cherychat_messages
             SET is_read = TRUE
             WHERE conversation_id = $1
-              AND sender_id <> $2
+            AND sender_id = $2
             `,
-            [conversationId, userId]
+            [
+                conversation.rows[0].id,
+                otherUserId
+            ]
         );
 
         res.json({
-            success: true,
-            message: "Messages marked as read"
+            success: true
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT MARK READ ERROR:",
-            error
-        );
+        console.error("READ MESSAGE ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message:
-                "Unable to mark messages as read"
+            message: "Unable to mark messages read."
         });
     }
 });
 
 /* =========================================================
-   GROUPS
+   CREATE GROUP
 ========================================================= */
 
-/* CREATE GROUP */
-
 app.post("/api/groups", async (req, res) => {
-    const client = await pool.connect();
-
     try {
         const ownerId = toId(req.body.ownerId);
-
-        const name =
-            cleanGroupName(req.body.name);
-
-        const description =
-            cleanDescription(req.body.description);
-
-        const privacy =
-            String(req.body.privacy || "public")
-                .toLowerCase();
-
-        const joiningFee =
-            Number(req.body.joiningFee || 0);
-
-        const groupPicture =
-            cleanText(req.body.groupPicture, 1000000);
+        const name = cleanGroupName(req.body.name);
+        const description = cleanDescription(req.body.description);
+        const groupType =
+            req.body.groupType === "private"
+                ? "private"
+                : "public";
 
         if (!ownerId || !name) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Owner ID and group name are required"
+                message: "Group name is required."
             });
         }
 
         if (!(await userExists(ownerId))) {
             return res.status(404).json({
                 success: false,
-                message: "User not found"
+                message: "Owner not found."
             });
         }
 
-        if (
-            privacy !== "public" &&
-            privacy !== "private"
+        let inviteCode = generateInviteCode();
+
+        while (
+            (
+                await pool.query(
+                    `
+                    SELECT id
+                    FROM cherychat_groups
+                    WHERE invite_code = $1
+                    `,
+                    [inviteCode]
+                )
+            ).rows.length
         ) {
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Group privacy must be public or private"
-            });
+            inviteCode = generateInviteCode();
         }
 
-        if (
-            !Number.isFinite(joiningFee) ||
-            joiningFee < 0
-        ) {
-            return res.status(400).json({
-                success: false,
-                message:
-                    "Joining fee must be zero or positive"
-            });
-        }
-
-        /*
-           Payments are intentionally not active yet.
-           The fee is stored for the future.
-        */
-
-        await client.query("BEGIN");
-
-        let inviteCode = null;
-
-        for (let attempt = 0; attempt < 10; attempt++) {
-            const candidate = generateInviteCode();
-
-            const check = await client.query(
-                `
-                SELECT id
-                FROM cherychat_groups
-                WHERE invite_code = $1
-                `,
-                [candidate]
-            );
-
-            if (check.rows.length === 0) {
-                inviteCode = candidate;
-                break;
-            }
-        }
-
-        if (!inviteCode) {
-            throw new Error(
-                "Unable to generate unique invite code"
-            );
-        }
-
-        const groupResult = await client.query(
+        const groupResult = await pool.query(
             `
             INSERT INTO cherychat_groups
             (
                 name,
                 description,
-                group_picture,
-                privacy,
-                joining_fee,
-                owner_id,
-                invite_code
+                group_type,
+                visibility,
+                invite_code,
+                owner_id
             )
-            VALUES
-            ($1, $2, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, $5, $6)
             RETURNING *
             `,
             [
                 name,
                 description,
-                groupPicture || null,
-                privacy,
-                joiningFee,
-                ownerId,
-                inviteCode
+                groupType,
+                groupType === "private"
+                    ? "private"
+                    : "public",
+                inviteCode,
+                ownerId
             ]
         );
 
         const group = groupResult.rows[0];
 
-        await client.query(
+        await pool.query(
             `
             INSERT INTO cherychat_group_members
             (
                 group_id,
                 user_id,
                 role,
-                membership_status,
-                payment_status
+                status
             )
-            VALUES
-            ($1, $2, 'owner', 'active', 'not_required')
+            VALUES ($1, $2, 'owner', 'active')
             `,
             [group.id, ownerId]
         );
 
-        await client.query("COMMIT");
-
         res.status(201).json({
             success: true,
-            message: "VibeChat group created successfully",
+            message: "Group created successfully.",
             group: formatGroup(group)
         });
-
     } catch (error) {
-        await client.query("ROLLBACK");
-
-        console.error(
-            "VIBECHAT CREATE GROUP ERROR:",
-            error
-        );
+        console.error("CREATE GROUP ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to create group"
+            message: "Unable to create group."
         });
-
-    } finally {
-        client.release();
     }
 });
 
-/* DISCOVER PUBLIC GROUPS */
+/* =========================================================
+   DISCOVER GROUPS
+========================================================= */
 
 app.get("/api/groups", async (req, res) => {
     try {
-        const userId =
-            toId(req.query.userId);
-
-        const q =
-            cleanText(
-                req.query.q || req.query.search,
-                100
-            );
-
-        const search = `%${q}%`;
+        const userId = toId(req.query.userId);
+        const q = cleanText(req.query.q, 100);
 
         const result = await pool.query(
             `
             SELECT
-                g.id,
-                g.name,
-                g.description,
-                g.group_picture,
-                g.privacy,
-                g.joining_fee,
-                g.owner_id,
-                g.invite_code,
-                g.created_at,
-                g.updated_at,
-
+                g.*,
                 u.full_name AS owner_name,
-
-                COUNT(
-                    CASE
-                        WHEN gm.membership_status = 'active'
-                        THEN 1
-                    END
-                ) AS member_count,
-
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM cherychat_group_members mine
-                        WHERE mine.group_id = g.id
-                          AND mine.user_id = $1
-                          AND mine.membership_status = 'active'
-                    )
-                    THEN TRUE
-                    ELSE FALSE
-                END AS is_member
-
-            FROM cherychat_groups g
-
-            JOIN cherychat_users u
-                ON u.id = g.owner_id
-
-            LEFT JOIN cherychat_group_members gm
-                ON gm.group_id = g.id
-
-            WHERE
-                g.privacy = 'public'
-                AND
                 (
-                    $2 = '%%'
-                    OR g.name ILIKE $2
-                    OR g.description ILIKE $2
+                    SELECT COUNT(*)
+                    FROM cherychat_group_members gm
+                    WHERE gm.group_id = g.id
+                    AND gm.status = 'active'
+                ) AS member_count
+            FROM cherychat_groups g
+            JOIN cherychat_users u
+            ON u.id = g.owner_id
+            WHERE
+                g.visibility = 'public'
+                AND (
+                    $1 = ''
+                    OR g.name ILIKE '%' || $1 || '%'
+                    OR g.description ILIKE '%' || $1 || '%'
                 )
-
-            GROUP BY
-                g.id,
-                u.full_name
-
-            ORDER BY
-                g.created_at DESC
-
+            ORDER BY g.created_at DESC
             LIMIT 100
             `,
-            [userId || 0, search]
+            [q]
         );
+
+        const groups = [];
+
+        for (const row of result.rows) {
+            let membership = null;
+
+            if (userId) {
+                membership = await getMembership(
+                    row.id,
+                    userId
+                );
+            }
+
+            groups.push({
+                ...formatGroup(row),
+                ownerName: row.owner_name,
+                memberCount: Number(row.member_count || 0),
+                membership: membership
+                    ? {
+                          role: membership.role,
+                          status: membership.status
+                      }
+                    : null
+            });
+        }
 
         res.json({
             success: true,
-            groups: result.rows.map(group =>
-                formatGroup(group, {
-                    memberCount:
-                        Number(group.member_count),
-                    isMember:
-                        group.is_member
-                })
-            )
+            groups
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT GROUP SEARCH ERROR:",
-            error
-        );
+        console.error("GET GROUPS ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to load groups"
+            message: "Unable to load groups."
         });
     }
 });
 
-/* MY GROUPS */
+/* =========================================================
+   MY GROUPS
+========================================================= */
 
 app.get("/api/groups/my", async (req, res) => {
     try {
-        const userId =
-            toId(req.query.userId);
+        const userId = toId(req.query.userId);
 
         if (!userId) {
             return res.status(400).json({
                 success: false,
-                message: "Valid user ID is required"
+                message: "Valid user ID is required."
             });
         }
 
         const result = await pool.query(
             `
             SELECT
-                g.id,
-                g.name,
-                g.description,
-                g.group_picture,
-                g.privacy,
-                g.joining_fee,
-                g.owner_id,
-                g.invite_code,
-                g.created_at,
-                g.updated_at,
-
-                u.full_name AS owner_name,
-
+                g.*,
                 gm.role,
-                gm.membership_status,
-                gm.payment_status,
-
-                COUNT(
-                    DISTINCT active_members.user_id
+                (
+                    SELECT COUNT(*)
+                    FROM cherychat_group_members members
+                    WHERE members.group_id = g.id
+                    AND members.status = 'active'
                 ) AS member_count
-
             FROM cherychat_group_members gm
-
             JOIN cherychat_groups g
-                ON g.id = gm.group_id
-
-            JOIN cherychat_users u
-                ON u.id = g.owner_id
-
-            LEFT JOIN cherychat_group_members active_members
-                ON active_members.group_id = g.id
-                AND active_members.membership_status = 'active'
-
-            WHERE
-                gm.user_id = $1
-                AND gm.membership_status = 'active'
-
-            GROUP BY
-                g.id,
-                u.full_name,
-                gm.role,
-                gm.membership_status,
-                gm.payment_status
-
-            ORDER BY
-                g.created_at DESC
+            ON g.id = gm.group_id
+            WHERE gm.user_id = $1
+            AND gm.status = 'active'
+            ORDER BY g.created_at DESC
             `,
             [userId]
         );
 
         res.json({
             success: true,
-            groups: result.rows.map(group =>
-                formatGroup(group, {
-                    role: group.role,
-                    membershipStatus:
-                        group.membership_status,
-                    paymentStatus:
-                        group.payment_status,
-                    memberCount:
-                        Number(group.member_count),
-                    isMember: true
-                })
-            )
+            groups: result.rows.map(row => ({
+                ...formatGroup(row),
+                role: row.role,
+                memberCount: Number(row.member_count || 0)
+            }))
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT MY GROUPS ERROR:",
-            error
-        );
+        console.error("MY GROUPS ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to load your groups"
+            message: "Unable to load your groups."
         });
     }
 });
 
-/* GET GROUP DETAILS */
+/* =========================================================
+   GROUP DETAILS
+========================================================= */
 
-app.get("/api/groups/:groupId", async (req, res) => {
+app.get("/api/groups/:id", async (req, res) => {
     try {
-        const groupId =
-            toId(req.params.groupId);
-
-        const userId =
-            toId(req.query.userId);
+        const groupId = toId(req.params.id);
+        const userId = toId(req.query.userId);
 
         if (!groupId) {
             return res.status(400).json({
                 success: false,
-                message: "Valid group ID is required"
+                message: "Invalid group."
             });
         }
 
-        const result = await pool.query(
-            `
-            SELECT
-                g.id,
-                g.name,
-                g.description,
-                g.group_picture,
-                g.privacy,
-                g.joining_fee,
-                g.owner_id,
-                g.invite_code,
-                g.created_at,
-                g.updated_at,
+        const group = await getGroup(groupId);
 
-                u.full_name AS owner_name,
-
-                COUNT(
-                    CASE
-                        WHEN gm.membership_status = 'active'
-                        THEN 1
-                    END
-                ) AS member_count,
-
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM cherychat_group_members me
-                        WHERE me.group_id = g.id
-                          AND me.user_id = $2
-                          AND me.membership_status = 'active'
-                    )
-                    THEN TRUE
-                    ELSE FALSE
-                END AS is_member,
-
-                (
-                    SELECT gm2.role
-                    FROM cherychat_group_members gm2
-                    WHERE gm2.group_id = g.id
-                      AND gm2.user_id = $2
-                      AND gm2.membership_status = 'active'
-                    LIMIT 1
-                ) AS my_role,
-
-                CASE
-                    WHEN EXISTS (
-                        SELECT 1
-                        FROM cherychat_group_join_requests jr
-                        WHERE jr.group_id = g.id
-                          AND jr.user_id = $2
-                          AND jr.status = 'pending'
-                    )
-                    THEN TRUE
-                    ELSE FALSE
-                END AS has_pending_request
-
-            FROM cherychat_groups g
-
-            JOIN cherychat_users u
-                ON u.id = g.owner_id
-
-            LEFT JOIN cherychat_group_members gm
-                ON gm.group_id = g.id
-
-            WHERE g.id = $1
-
-            GROUP BY
-                g.id,
-                u.full_name
-            `,
-            [groupId, userId || 0]
-        );
-
-        if (result.rows.length === 0) {
+        if (!group) {
             return res.status(404).json({
                 success: false,
-                message: "Group not found"
+                message: "Group not found."
             });
         }
 
-        const group = result.rows[0];
-
-        /*
-           Private groups are not freely discoverable,
-           but an existing member can always see details.
-        */
-
-        if (
-            group.privacy === "private" &&
-            !group.is_member &&
-            group.owner_id !== userId
-        ) {
-            return res.status(403).json({
-                success: false,
-                message:
-                    "This is a private group. Use a valid invite to request access."
-            });
-        }
+        const membership = userId
+            ? await getMembership(groupId, userId)
+            : null;
 
         res.json({
             success: true,
-            group: formatGroup(group, {
-                memberCount:
-                    Number(group.member_count),
-                isMember:
-                    group.is_member,
-                myRole:
-                    group.my_role || null,
-                hasPendingRequest:
-                    group.has_pending_request
-            })
+            group: {
+                ...formatGroup(group),
+                membership: membership
+                    ? {
+                          role: membership.role,
+                          status: membership.status
+                      }
+                    : null
+            }
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT GROUP DETAILS ERROR:",
-            error
-        );
+        console.error("GROUP DETAILS ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to load group"
+            message: "Unable to load group."
         });
     }
 });
@@ -1966,26 +1488,15 @@ app.get("/api/groups/:groupId", async (req, res) => {
    JOIN PUBLIC GROUP
 ========================================================= */
 
-app.post("/api/groups/:groupId/join", async (req, res) => {
+app.post("/api/groups/:id/join", async (req, res) => {
     try {
-        const groupId =
-            toId(req.params.groupId);
-
-        const userId =
-            toId(req.body.userId);
+        const groupId = toId(req.params.id);
+        const userId = toId(req.body.userId);
 
         if (!groupId || !userId) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Valid group ID and user ID are required"
-            });
-        }
-
-        if (!(await userExists(userId))) {
-            return res.status(404).json({
-                success: false,
-                message: "User not found"
+                message: "Invalid request."
             });
         }
 
@@ -1994,115 +1505,84 @@ app.post("/api/groups/:groupId/join", async (req, res) => {
         if (!group) {
             return res.status(404).json({
                 success: false,
-                message: "Group not found"
+                message: "Group not found."
             });
         }
 
-        if (group.privacy !== "public") {
+        if (group.group_type === "private") {
             return res.status(403).json({
                 success: false,
-                message:
-                    "Private groups require an access request"
+                message: "This is a private group."
             });
         }
 
-        /*
-           Payments are not active yet.
-           Therefore a public group with a joining fee
-           cannot currently be joined.
-        */
-
-        if (Number(group.joining_fee) > 0) {
-            return res.status(402).json({
-                success: false,
-                paymentRequired: true,
-                message:
-                    "This group has a joining fee. Payment integration will be connected later.",
-                joiningFee:
-                    Number(group.joining_fee),
-                currency: "KES"
-            });
-        }
-
-        const existing =
-            await getMembership(groupId, userId);
-
-        if (
-            existing &&
-            existing.membership_status === "active"
-        ) {
-            return res.json({
-                success: true,
-                alreadyMember: true,
-                message: "You are already a group member"
-            });
-        }
-
-        await pool.query(
-            `
-            INSERT INTO cherychat_group_members
-            (
-                group_id,
-                user_id,
-                role,
-                membership_status,
-                payment_status
-            )
-            VALUES
-            ($1, $2, 'member', 'active', 'not_required')
-
-            ON CONFLICT (group_id, user_id)
-            DO UPDATE SET
-                role = 'member',
-                membership_status = 'active',
-                payment_status = 'not_required',
-                joined_at = CURRENT_TIMESTAMP
-            `,
-            [groupId, userId]
+        const existing = await getMembership(
+            groupId,
+            userId
         );
+
+        if (existing) {
+            if (existing.status === "active") {
+                return res.json({
+                    success: true,
+                    message: "You are already a member."
+                });
+            }
+
+            await pool.query(
+                `
+                UPDATE cherychat_group_members
+                SET status = 'active',
+                    role = 'member',
+                    joined_at = CURRENT_TIMESTAMP
+                WHERE group_id = $1
+                AND user_id = $2
+                `,
+                [groupId, userId]
+            );
+        } else {
+            await pool.query(
+                `
+                INSERT INTO cherychat_group_members
+                (
+                    group_id,
+                    user_id,
+                    role,
+                    status
+                )
+                VALUES ($1, $2, 'member', 'active')
+                `,
+                [groupId, userId]
+            );
+        }
 
         res.json({
             success: true,
-            message: "You joined the group successfully"
+            message: "You joined the group."
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT JOIN GROUP ERROR:",
-            error
-        );
+        console.error("JOIN GROUP ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message: "Unable to join group"
+            message: "Unable to join group."
         });
     }
 });
 
 /* =========================================================
-   REQUEST PRIVATE GROUP JOIN
+   PRIVATE GROUP REQUEST
 ========================================================= */
 
-app.post("/api/groups/:groupId/request", async (req, res) => {
+app.post("/api/groups/:id/request", async (req, res) => {
     try {
-        const groupId =
-            toId(req.params.groupId);
-
-        const userId =
-            toId(req.body.userId);
+        const groupId = toId(req.params.id);
+        const userId = toId(req.body.userId);
 
         if (!groupId || !userId) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Valid group ID and user ID are required"
-            });
-        }
-
-        if (!(await userExists(userId))) {
-            return res.status(404).json({
-                success: false,
-                message: "User not found"
+                message: "Invalid request."
             });
         }
 
@@ -2111,73 +1591,42 @@ app.post("/api/groups/:groupId/request", async (req, res) => {
         if (!group) {
             return res.status(404).json({
                 success: false,
-                message: "Group not found"
+                message: "Group not found."
             });
         }
 
-        if (group.privacy !== "private") {
-            return res.status(400).json({
-                success: false,
-                message:
-                    "This is not a private group"
-            });
-        }
-
-        if (group.owner_id === userId) {
-            return res.status(400).json({
-                success: false,
-                message:
-                    "You already own this group"
-            });
-        }
-
-        if (await isActiveMember(groupId, userId)) {
-            return res.json({
-                success: true,
-                alreadyMember: true,
-                message:
-                    "You are already a member of this group"
-            });
-        }
-
-        /*
-           Payment is deliberately NOT started here.
-           Payments will be connected later.
-        */
-
-        if (Number(group.joining_fee) > 0) {
-            return res.status(402).json({
-                success: false,
-                paymentRequired: true,
-                message:
-                    "This private group has a joining fee. Payment integration will be connected later.",
-                joiningFee:
-                    Number(group.joining_fee),
-                currency: "KES"
-            });
-        }
-
-        const existingRequest =
-            await pool.query(
-                `
-                SELECT *
-                FROM cherychat_group_join_requests
-                WHERE group_id = $1
-                  AND user_id = $2
-                LIMIT 1
-                `,
-                [groupId, userId]
-            );
+        const membership = await getMembership(
+            groupId,
+            userId
+        );
 
         if (
-            existingRequest.rows.length > 0 &&
-            existingRequest.rows[0].status === "pending"
+            membership &&
+            membership.status === "active"
         ) {
             return res.json({
                 success: true,
-                alreadyRequested: true,
-                message:
-                    "Your request is already pending"
+                message: "You are already a member."
+            });
+        }
+
+        const existing = await pool.query(
+            `
+            SELECT *
+            FROM cherychat_group_join_requests
+            WHERE group_id = $1
+            AND user_id = $2
+            `,
+            [groupId, userId]
+        );
+
+        if (
+            existing.rows.length &&
+            existing.rows[0].status === "pending"
+        ) {
+            return res.json({
+                success: true,
+                message: "Request already pending."
             });
         }
 
@@ -2189,16 +1638,145 @@ app.post("/api/groups/:groupId/request", async (req, res) => {
                 user_id,
                 status
             )
-            VALUES
-            ($1, $2, 'pending')
-
+            VALUES ($1, $2, 'pending')
             ON CONFLICT (group_id, user_id)
             DO UPDATE SET
                 status = 'pending',
-                updated_at = CURRENT_TIMESTAMP
+                created_at = CURRENT_TIMESTAMP
             `,
             [groupId, userId]
         );
+
+        res.json({
+            success: true,
+            message: "Join request sent."
+        });
+    } catch (error) {
+        console.error("GROUP REQUEST ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to send request."
+        });
+    }
+});
+
+/* =========================================================
+   GROUP REQUESTS FOR ADMIN
+========================================================= */
+
+app.get("/api/groups/:id/requests", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.query.userId);
+
+        if (!(await isAdminOrOwner(groupId, userId))) {
+            return res.status(403).json({
+                success: false,
+                message: "Admin access required."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            SELECT
+                r.id,
+                r.group_id,
+                r.user_id,
+                r.status,
+                r.created_at,
+                u.full_name,
+                u.email,
+                u.profile_picture
+            FROM cherychat_group_join_requests r
+            JOIN cherychat_users u
+            ON u.id = r.user_id
+            WHERE r.group_id = $1
+            AND r.status = 'pending'
+            ORDER BY r.created_at ASC
+            `,
+            [groupId]
+        );
+
+        res.json({
+            success: true,
+            requests: result.rows.map(row => ({
+                id: row.id,
+                groupId: row.group_id,
+                userId: row.user_id,
+                fullName: row.full_name,
+                email: row.email,
+                profilePicture:
+                    row.profile_picture ||
+                    createAvatar(row.full_name),
+                createdAt: row.created_at
+            }))
+        });
+    } catch (error) {
+        console.error("GROUP REQUESTS ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load requests."
+        });
+    }
+});
+
+/* =========================================================
+   APPROVE / REJECT GROUP REQUEST
+========================================================= */
+
+app.post("/api/groups/:id/requests/:requestId", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const requestId = toId(req.params.requestId);
+        const adminId = toId(req.body.userId);
+        const action =
+            req.body.action === "reject"
+                ? "reject"
+                : "approve";
+
+        if (!(await isAdminOrOwner(groupId, adminId))) {
+            return res.status(403).json({
+                success: false,
+                message: "Admin access required."
+            });
+        }
+
+        const requestResult = await pool.query(
+            `
+            SELECT *
+            FROM cherychat_group_join_requests
+            WHERE id = $1
+            AND group_id = $2
+            `,
+            [requestId, groupId]
+        );
+
+        if (!requestResult.rows.length) {
+            return res.status(404).json({
+                success: false,
+                message: "Request not found."
+            });
+        }
+
+        const request = requestResult.rows[0];
+
+        if (action === "reject") {
+            await pool.query(
+                `
+                UPDATE cherychat_group_join_requests
+                SET status = 'rejected'
+                WHERE id = $1
+                `,
+                [requestId]
+            );
+
+            return res.json({
+                success: true,
+                message: "Request rejected."
+            });
+        }
 
         await pool.query(
             `
@@ -2207,1485 +1785,582 @@ app.post("/api/groups/:groupId/request", async (req, res) => {
                 group_id,
                 user_id,
                 role,
-                membership_status,
-                payment_status
+                status
             )
-            VALUES
-            ($1, $2, 'member', 'pending', 'not_required')
-
+            VALUES ($1, $2, 'member', 'active')
             ON CONFLICT (group_id, user_id)
-            DO UPDATE SET
-                membership_status = 'pending',
-                payment_status = 'not_required'
+            DO UPDATE SET status = 'active'
             `,
-            [groupId, userId]
+            [
+                groupId,
+                request.user_id
+            ]
         );
 
-        res.status(202).json({
+        await pool.query(
+            `
+            UPDATE cherychat_group_join_requests
+            SET status = 'approved'
+            WHERE id = $1
+            `,
+            [requestId]
+        );
+
+        res.json({
             success: true,
-            paymentRequired: false,
-            message:
-                "Join request sent to the group admin"
+            message: "Member approved."
         });
-
     } catch (error) {
-        console.error(
-            "VIBECHAT PRIVATE GROUP REQUEST ERROR:",
-            error
-        );
+        console.error("APPROVE REQUEST ERROR:", error);
 
         res.status(500).json({
             success: false,
-            message:
-                "Unable to request group access"
+            message: "Unable to process request."
         });
     }
 });
 
 /* =========================================================
-   MY PENDING REQUEST
-========================================================= */
-
-app.get(
-    "/api/groups/:groupId/request-status",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
-
-            const userId =
-                toId(req.query.userId);
-
-            if (!groupId || !userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid group ID and user ID are required"
-                });
-            }
-
-            const result = await pool.query(
-                `
-                SELECT
-                    id,
-                    status,
-                    created_at,
-                    updated_at
-                FROM cherychat_group_join_requests
-                WHERE group_id = $1
-                  AND user_id = $2
-                LIMIT 1
-                `,
-                [groupId, userId]
-            );
-
-            if (result.rows.length === 0) {
-                return res.json({
-                    success: true,
-                    hasRequest: false,
-                    request: null
-                });
-            }
-
-            const request = result.rows[0];
-
-            res.json({
-                success: true,
-                hasRequest: true,
-                request: {
-                    id: request.id,
-                    status: request.status,
-                    createdAt: request.created_at,
-                    updatedAt: request.updated_at
-                }
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT REQUEST STATUS ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to load request status"
-            });
-        }
-    }
-);
-
-/* =========================================================
-   GROUP INVITE
-========================================================= */
-
-app.get(
-    "/api/groups/invite/:inviteCode",
-    async (req, res) => {
-        try {
-            const inviteCode =
-                cleanText(
-                    req.params.inviteCode,
-                    30
-                ).toUpperCase();
-
-            const result = await pool.query(
-                `
-                SELECT
-                    g.id,
-                    g.name,
-                    g.description,
-                    g.group_picture,
-                    g.privacy,
-                    g.joining_fee,
-                    g.owner_id,
-                    g.invite_code,
-                    g.created_at,
-
-                    u.full_name AS owner_name,
-
-                    COUNT(
-                        CASE
-                            WHEN gm.membership_status = 'active'
-                            THEN 1
-                        END
-                    ) AS member_count
-
-                FROM cherychat_groups g
-
-                JOIN cherychat_users u
-                    ON u.id = g.owner_id
-
-                LEFT JOIN cherychat_group_members gm
-                    ON gm.group_id = g.id
-
-                WHERE g.invite_code = $1
-
-                GROUP BY
-                    g.id,
-                    u.full_name
-                `,
-                [inviteCode]
-            );
-
-            if (result.rows.length === 0) {
-                return res.status(404).json({
-                    success: false,
-                    message: "Invalid group invite"
-                });
-            }
-
-            const group = result.rows[0];
-
-            res.json({
-                success: true,
-                group: formatGroup(group, {
-                    memberCount:
-                        Number(group.member_count)
-                })
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT GROUP INVITE ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to load group invite"
-            });
-        }
-    }
-);
-
-/* =========================================================
-   ADMIN: GET JOIN REQUESTS
-========================================================= */
-
-app.get(
-    "/api/groups/:groupId/requests",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
-
-            const actorId =
-                toId(req.query.userId);
-
-            if (!groupId || !actorId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid group ID and user ID are required"
-                });
-            }
-
-            if (
-                !(await isAdminOrOwner(
-                    groupId,
-                    actorId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only group admins can view join requests"
-                });
-            }
-
-            const result = await pool.query(
-                `
-                SELECT
-                    jr.id,
-                    jr.group_id,
-                    jr.user_id,
-                    jr.status,
-                    jr.created_at,
-                    jr.updated_at,
-
-                    u.full_name,
-                    u.email,
-                    u.phone,
-                    u.profile_picture,
-                    u.about,
-                    u.is_online,
-                    u.last_seen
-
-                FROM cherychat_group_join_requests jr
-
-                JOIN cherychat_users u
-                    ON u.id = jr.user_id
-
-                WHERE jr.group_id = $1
-                  AND jr.status = 'pending'
-
-                ORDER BY jr.created_at ASC
-                `,
-                [groupId]
-            );
-
-            res.json({
-                success: true,
-                requests: result.rows.map(request => ({
-                    id: request.id,
-                    groupId: request.group_id,
-                    userId: request.user_id,
-                    fullName: request.full_name,
-                    email: request.email,
-                    phone: request.phone,
-                    profilePicture:
-                        request.profile_picture,
-                    about: request.about,
-                    isOnline: request.is_online,
-                    lastSeen: request.last_seen,
-                    status: request.status,
-                    createdAt: request.created_at,
-                    updatedAt: request.updated_at
-                }))
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT GROUP REQUESTS ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to load join requests"
-            });
-        }
-    }
-);
-
-/* =========================================================
-   ADMIN: APPROVE JOIN REQUEST
-========================================================= */
-
-app.post(
-    "/api/groups/:groupId/requests/:requestId/approve",
-    async (req, res) => {
-        const client = await pool.connect();
-
-        try {
-            const groupId =
-                toId(req.params.groupId);
-
-            const requestId =
-                toId(req.params.requestId);
-
-            const actorId =
-                toId(req.body.userId);
-
-            if (!groupId || !requestId || !actorId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid group, request and user IDs are required"
-                });
-            }
-
-            if (
-                !(await isAdminOrOwner(
-                    groupId,
-                    actorId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only group admins can approve requests"
-                });
-            }
-
-            const requestResult =
-                await client.query(
-                    `
-                    SELECT *
-                    FROM cherychat_group_join_requests
-                    WHERE id = $1
-                      AND group_id = $2
-                    LIMIT 1
-                    `,
-                    [requestId, groupId]
-                );
-
-            if (requestResult.rows.length === 0) {
-                return res.status(404).json({
-                    success: false,
-                    message: "Join request not found"
-                });
-            }
-
-            const request =
-                requestResult.rows[0];
-
-            if (request.status !== "pending") {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "This request has already been processed"
-                });
-            }
-
-            const group = await getGroup(groupId);
-
-            if (!group) {
-                return res.status(404).json({
-                    success: false,
-                    message: "Group not found"
-                });
-            }
-
-            /*
-               Paid groups remain blocked until payments
-               are connected.
-            */
-
-            if (Number(group.joining_fee) > 0) {
-                return res.status(402).json({
-                    success: false,
-                    paymentRequired: true,
-                    message:
-                        "Payment integration is required before this request can be approved.",
-                    joiningFee:
-                        Number(group.joining_fee),
-                    currency: "KES"
-                });
-            }
-
-            await client.query("BEGIN");
-
-            await client.query(
-                `
-                INSERT INTO cherychat_group_members
-                (
-                    group_id,
-                    user_id,
-                    role,
-                    membership_status,
-                    payment_status
-                )
-                VALUES
-                ($1, $2, 'member', 'active', 'not_required')
-
-                ON CONFLICT (group_id, user_id)
-                DO UPDATE SET
-                    role = 'member',
-                    membership_status = 'active',
-                    payment_status = 'not_required',
-                    joined_at = CURRENT_TIMESTAMP
-                `,
-                [groupId, request.user_id]
-            );
-
-            await client.query(
-                `
-                UPDATE cherychat_group_join_requests
-                SET
-                    status = 'approved',
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = $1
-                `,
-                [requestId]
-            );
-
-            await client.query("COMMIT");
-
-            res.json({
-                success: true,
-                message:
-                    "Join request approved successfully"
-            });
-
-        } catch (error) {
-            await client.query("ROLLBACK");
-
-            console.error(
-                "VIBECHAT APPROVE REQUEST ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to approve join request"
-            });
-
-        } finally {
-            client.release();
-        }
-    }
-);
-
-/* =========================================================
-   ADMIN: REJECT JOIN REQUEST
-========================================================= */
-
-app.post(
-    "/api/groups/:groupId/requests/:requestId/reject",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
-
-            const requestId =
-                toId(req.params.requestId);
-
-            const actorId =
-                toId(req.body.userId);
-
-            if (!groupId || !requestId || !actorId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid group, request and user IDs are required"
-                });
-            }
-
-            if (
-                !(await isAdminOrOwner(
-                    groupId,
-                    actorId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only group admins can reject requests"
-                });
-            }
-
-            const request =
-                await pool.query(
-                    `
-                    SELECT *
-                    FROM cherychat_group_join_requests
-                    WHERE id = $1
-                      AND group_id = $2
-                    LIMIT 1
-                    `,
-                    [requestId, groupId]
-                );
-
-            if (request.rows.length === 0) {
-                return res.status(404).json({
-                    success: false,
-                    message: "Join request not found"
-                });
-            }
-
-            if (
-                request.rows[0].status !== "pending"
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "This request has already been processed"
-                });
-            }
-
-            await pool.query(
-                `
-                UPDATE cherychat_group_join_requests
-                SET
-                    status = 'rejected',
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = $1
-                `,
-                [requestId]
-            );
-
-            await pool.query(
-                `
-                UPDATE cherychat_group_members
-                SET
-                    membership_status = 'removed',
-                    payment_status = 'not_required'
-                WHERE group_id = $1
-                  AND user_id = $2
-                  AND membership_status = 'pending'
-                `,
-                [
-                    groupId,
-                    request.rows[0].user_id
-                ]
-            );
-
-            res.json({
-                success: true,
-                message:
-                    "Join request rejected"
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT REJECT REQUEST ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to reject join request"
-            });
-        }
-    }
-);
-
-/* =========================================================
    GROUP MEMBERS
 ========================================================= */
 
-app.get(
-    "/api/groups/:groupId/members",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
+app.get("/api/groups/:id/members", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.query.userId);
 
-            const userId =
-                toId(req.query.userId);
-
-            if (!groupId || !userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid group ID and user ID are required"
-                });
-            }
-
-            if (
-                !(await isActiveMember(
-                    groupId,
-                    userId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "You are not a member of this group"
-                });
-            }
-
-            const result = await pool.query(
-                `
-                SELECT
-                    gm.user_id,
-                    gm.role,
-                    gm.membership_status,
-                    gm.payment_status,
-                    gm.joined_at,
-
-                    u.full_name,
-                    u.email,
-                    u.phone,
-                    u.profile_picture,
-                    u.about,
-                    u.is_online,
-                    u.last_seen
-
-                FROM cherychat_group_members gm
-
-                JOIN cherychat_users u
-                    ON u.id = gm.user_id
-
-                WHERE gm.group_id = $1
-                  AND gm.membership_status = 'active'
-
-                ORDER BY
-                    CASE
-                        WHEN gm.role = 'owner' THEN 1
-                        WHEN gm.role = 'admin' THEN 2
-                        ELSE 3
-                    END,
-                    u.full_name ASC
-                `,
-                [groupId]
-            );
-
-            res.json({
-                success: true,
-                members: result.rows.map(member => ({
-                    userId: member.user_id,
-                    fullName: member.full_name,
-                    email: member.email,
-                    phone: member.phone,
-                    profilePicture:
-                        member.profile_picture,
-                    about: member.about,
-                    isOnline: member.is_online,
-                    lastSeen: member.last_seen,
-                    role: member.role,
-                    membershipStatus:
-                        member.membership_status,
-                    paymentStatus:
-                        member.payment_status,
-                    joinedAt:
-                        member.joined_at
-                }))
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT GROUP MEMBERS ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!(await isActiveMember(groupId, userId))) {
+            return res.status(403).json({
                 success: false,
-                message:
-                    "Unable to load group members"
+                message: "Group membership required."
             });
         }
+
+        const result = await pool.query(
+            `
+            SELECT
+                gm.id,
+                gm.user_id,
+                gm.role,
+                gm.status,
+                gm.joined_at,
+                u.full_name,
+                u.email,
+                u.profile_picture,
+                u.is_online,
+                u.last_seen
+            FROM cherychat_group_members gm
+            JOIN cherychat_users u
+            ON u.id = gm.user_id
+            WHERE gm.group_id = $1
+            AND gm.status = 'active'
+            ORDER BY
+                CASE
+                    WHEN gm.role = 'owner' THEN 0
+                    WHEN gm.role = 'admin' THEN 1
+                    ELSE 2
+                END,
+                u.full_name ASC
+            `,
+            [groupId]
+        );
+
+        res.json({
+            success: true,
+            members: result.rows.map(row => ({
+                id: row.id,
+                userId: row.user_id,
+                fullName: row.full_name,
+                email: row.email,
+                profilePicture:
+                    row.profile_picture ||
+                    createAvatar(row.full_name),
+                role: row.role,
+                status: row.status,
+                isOnline: !!row.is_online,
+                lastSeen: row.last_seen,
+                joinedAt: row.joined_at
+            }))
+        });
+    } catch (error) {
+        console.error("GROUP MEMBERS ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load members."
+        });
     }
-);
+});
 
 /* =========================================================
    GROUP MESSAGES
 ========================================================= */
 
-app.post(
-    "/api/groups/:groupId/messages",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
+app.get("/api/groups/:id/messages", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.query.userId);
 
-            const senderId =
-                toId(req.body.senderId);
-
-            const message =
-                cleanText(req.body.message, 5000);
-
-            if (!groupId || !senderId || !message) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Group ID, sender ID and message are required"
-                });
-            }
-
-            if (
-                !(await isActiveMember(
-                    groupId,
-                    senderId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only active group members can send messages"
-                });
-            }
-
-            const result = await pool.query(
-                `
-                INSERT INTO cherychat_group_messages
-                (
-                    group_id,
-                    sender_id,
-                    message_text
-                )
-                VALUES
-                ($1, $2, $3)
-
-                RETURNING
-                    id,
-                    group_id,
-                    sender_id,
-                    message_text,
-                    created_at
-                `,
-                [
-                    groupId,
-                    senderId,
-                    message
-                ]
-            );
-
-            const saved = result.rows[0];
-
-            const sender = await pool.query(
-                `
-                SELECT
-                    full_name,
-                    profile_picture
-                FROM cherychat_users
-                WHERE id = $1
-                `,
-                [senderId]
-            );
-
-            res.status(201).json({
-                success: true,
-                message: {
-                    id: saved.id,
-                    groupId: saved.group_id,
-                    senderId: saved.sender_id,
-                    senderName:
-                        sender.rows[0]?.full_name || "",
-                    senderPicture:
-                        sender.rows[0]?.profile_picture || null,
-                    message:
-                        saved.message_text,
-                    createdAt:
-                        saved.created_at
-                }
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT GROUP SEND MESSAGE ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!(await isActiveMember(groupId, userId))) {
+            return res.status(403).json({
                 success: false,
-                message:
-                    "Unable to send group message"
+                message: "Group membership required."
             });
         }
+
+        const result = await pool.query(
+            `
+            SELECT
+                gm.id,
+                gm.group_id,
+                gm.sender_id,
+                gm.message_text,
+                gm.created_at,
+                u.full_name AS sender_name,
+                u.profile_picture AS sender_picture
+            FROM cherychat_group_messages gm
+            JOIN cherychat_users u
+            ON u.id = gm.sender_id
+            WHERE gm.group_id = $1
+            ORDER BY gm.created_at ASC
+            LIMIT 500
+            `,
+            [groupId]
+        );
+
+        res.json({
+            success: true,
+            messages: result.rows.map(row => ({
+                id: row.id,
+                groupId: row.group_id,
+                senderId: row.sender_id,
+                senderName: row.sender_name,
+                senderPicture:
+                    row.sender_picture ||
+                    createAvatar(row.sender_name),
+                messageText: row.message_text,
+                createdAt: row.created_at
+            }))
+        });
+    } catch (error) {
+        console.error("GROUP MESSAGES ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load group messages."
+        });
     }
-);
+});
 
-app.get(
-    "/api/groups/:groupId/messages",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
+app.post("/api/groups/:id/messages", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const senderId = toId(req.body.userId);
+        const messageText = cleanText(
+            req.body.messageText,
+            5000
+        );
 
-            const userId =
-                toId(req.query.userId);
-
-            if (!groupId || !userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid group ID and user ID are required"
-                });
-            }
-
-            if (
-                !(await isActiveMember(
-                    groupId,
-                    userId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only group members can view messages"
-                });
-            }
-
-            const result = await pool.query(
-                `
-                SELECT
-                    gm.id,
-                    gm.group_id,
-                    gm.sender_id,
-                    u.full_name AS sender_name,
-                    u.profile_picture AS sender_picture,
-                    gm.message_text,
-                    gm.created_at
-
-                FROM cherychat_group_messages gm
-
-                JOIN cherychat_users u
-                    ON u.id = gm.sender_id
-
-                WHERE gm.group_id = $1
-
-                ORDER BY
-                    gm.created_at ASC,
-                    gm.id ASC
-                `,
-                [groupId]
-            );
-
-            res.json({
-                success: true,
-                messages: result.rows.map(message => ({
-                    id: message.id,
-                    groupId: message.group_id,
-                    senderId: message.sender_id,
-                    senderName:
-                        message.sender_name,
-                    senderPicture:
-                        message.sender_picture,
-                    message:
-                        message.message_text,
-                    createdAt:
-                        message.created_at
-                }))
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT GROUP GET MESSAGES ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (
+            !(await isActiveMember(groupId, senderId))
+        ) {
+            return res.status(403).json({
                 success: false,
-                message:
-                    "Unable to load group messages"
+                message: "Group membership required."
             });
         }
+
+        if (!messageText) {
+            return res.status(400).json({
+                success: false,
+                message: "Message cannot be empty."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            INSERT INTO cherychat_group_messages
+            (
+                group_id,
+                sender_id,
+                message_text
+            )
+            VALUES ($1, $2, $3)
+            RETURNING *
+            `,
+            [
+                groupId,
+                senderId,
+                messageText
+            ]
+        );
+
+        res.status(201).json({
+            success: true,
+            message: result.rows[0]
+        });
+    } catch (error) {
+        console.error("SEND GROUP MESSAGE ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to send group message."
+        });
     }
-);
+});
 
 /* =========================================================
    LEAVE GROUP
 ========================================================= */
 
-app.post(
-    "/api/groups/:groupId/leave",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
+app.post("/api/groups/:id/leave", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.body.userId);
 
-            const userId =
-                toId(req.body.userId);
+        const group = await getGroup(groupId);
 
-            if (!groupId || !userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid group ID and user ID are required"
-                });
-            }
-
-            const member =
-                await getMembership(
-                    groupId,
-                    userId
-                );
-
-            if (
-                !member ||
-                member.membership_status !== "active"
-            ) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "You are not an active member of this group"
-                });
-            }
-
-            if (member.role === "owner") {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "The owner cannot leave the group. Transfer ownership or delete the group."
-                });
-            }
-
-            await pool.query(
-                `
-                UPDATE cherychat_group_members
-                SET membership_status = 'removed'
-                WHERE group_id = $1
-                  AND user_id = $2
-                `,
-                [groupId, userId]
-            );
-
-            res.json({
-                success: true,
-                message: "You left the group"
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT LEAVE GROUP ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!group) {
+            return res.status(404).json({
                 success: false,
-                message: "Unable to leave group"
+                message: "Group not found."
             });
         }
+
+        if (group.owner_id === userId) {
+            return res.status(400).json({
+                success: false,
+                message: "The group owner cannot leave. Delete the group instead."
+            });
+        }
+
+        await pool.query(
+            `
+            UPDATE cherychat_group_members
+            SET status = 'left'
+            WHERE group_id = $1
+            AND user_id = $2
+            `,
+            [groupId, userId]
+        );
+
+        res.json({
+            success: true,
+            message: "You left the group."
+        });
+    } catch (error) {
+        console.error("LEAVE GROUP ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to leave group."
+        });
     }
-);
+});
 
 /* =========================================================
    REMOVE MEMBER
 ========================================================= */
 
-app.post(
-    "/api/groups/:groupId/remove-member",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
+app.delete("/api/groups/:id/members/:memberId", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const memberId = toId(req.params.memberId);
+        const adminId = toId(req.body.userId);
 
-            const actorId =
-                toId(req.body.actorId);
-
-            const targetUserId =
-                toId(req.body.targetUserId);
-
-            if (!groupId || !actorId || !targetUserId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid group, actor and target IDs are required"
-                });
-            }
-
-            const actor =
-                await getMembership(
-                    groupId,
-                    actorId
-                );
-
-            if (
-                !actor ||
-                actor.membership_status !== "active"
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "You are not an active group member"
-                });
-            }
-
-            if (
-                actor.role !== "owner" &&
-                actor.role !== "admin"
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only the owner or an admin can remove members"
-                });
-            }
-
-            const target =
-                await getMembership(
-                    groupId,
-                    targetUserId
-                );
-
-            if (
-                !target ||
-                target.membership_status !== "active"
-            ) {
-                return res.status(404).json({
-                    success: false,
-                    message: "Member not found"
-                });
-            }
-
-            if (target.role === "owner") {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "The group owner cannot be removed"
-                });
-            }
-
-            if (
-                target.role === "admin" &&
-                actor.role !== "owner"
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only the owner can remove an admin"
-                });
-            }
-
-            await pool.query(
-                `
-                UPDATE cherychat_group_members
-                SET membership_status = 'removed'
-                WHERE group_id = $1
-                  AND user_id = $2
-                `,
-                [groupId, targetUserId]
-            );
-
-            res.json({
-                success: true,
-                message:
-                    "Member removed from group"
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT REMOVE MEMBER ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!(await isAdminOrOwner(groupId, adminId))) {
+            return res.status(403).json({
                 success: false,
-                message:
-                    "Unable to remove member"
+                message: "Admin access required."
             });
         }
+
+        const target = await getMembership(
+            groupId,
+            memberId
+        );
+
+        if (!target) {
+            return res.status(404).json({
+                success: false,
+                message: "Member not found."
+            });
+        }
+
+        if (target.role === "owner") {
+            return res.status(400).json({
+                success: false,
+                message: "The group owner cannot be removed."
+            });
+        }
+
+        await pool.query(
+            `
+            UPDATE cherychat_group_members
+            SET status = 'removed'
+            WHERE group_id = $1
+            AND user_id = $2
+            `,
+            [groupId, memberId]
+        );
+
+        res.json({
+            success: true,
+            message: "Member removed."
+        });
+    } catch (error) {
+        console.error("REMOVE MEMBER ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to remove member."
+        });
     }
-);
+});
 
 /* =========================================================
    MAKE ADMIN
 ========================================================= */
 
-app.post(
-    "/api/groups/:groupId/make-admin",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
+app.post("/api/groups/:id/members/:memberId/admin", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const memberId = toId(req.params.memberId);
+        const adminId = toId(req.body.userId);
 
-            const ownerId =
-                toId(req.body.ownerId);
-
-            const targetUserId =
-                toId(req.body.targetUserId);
-
-            if (!groupId || !ownerId || !targetUserId) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Valid IDs are required"
-                });
-            }
-
-            const owner =
-                await getMembership(
-                    groupId,
-                    ownerId
-                );
-
-            if (
-                !owner ||
-                owner.membership_status !== "active" ||
-                owner.role !== "owner"
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only the group owner can manage admins"
-                });
-            }
-
-            const result = await pool.query(
-                `
-                UPDATE cherychat_group_members
-                SET role = 'admin'
-                WHERE group_id = $1
-                  AND user_id = $2
-                  AND membership_status = 'active'
-                  AND role <> 'owner'
-                RETURNING user_id, role
-                `,
-                [groupId, targetUserId]
-            );
-
-            if (result.rows.length === 0) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Active group member not found"
-                });
-            }
-
-            res.json({
-                success: true,
-                message:
-                    "Member promoted to admin"
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT MAKE ADMIN ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!(await isAdminOrOwner(groupId, adminId))) {
+            return res.status(403).json({
                 success: false,
-                message:
-                    "Unable to promote member"
+                message: "Admin access required."
             });
         }
+
+        await pool.query(
+            `
+            UPDATE cherychat_group_members
+            SET role = 'admin'
+            WHERE group_id = $1
+            AND user_id = $2
+            AND status = 'active'
+            AND role <> 'owner'
+            `,
+            [groupId, memberId]
+        );
+
+        res.json({
+            success: true,
+            message: "Member is now an admin."
+        });
+    } catch (error) {
+        console.error("MAKE ADMIN ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to make admin."
+        });
     }
-);
+});
 
 /* =========================================================
    REMOVE ADMIN
 ========================================================= */
 
-app.post(
-    "/api/groups/:groupId/remove-admin",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
+app.delete("/api/groups/:id/members/:memberId/admin", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const memberId = toId(req.params.memberId);
+        const adminId = toId(req.body.userId);
 
-            const ownerId =
-                toId(req.body.ownerId);
-
-            const targetUserId =
-                toId(req.body.targetUserId);
-
-            if (!groupId || !ownerId || !targetUserId) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Valid IDs are required"
-                });
-            }
-
-            const owner =
-                await getMembership(
-                    groupId,
-                    ownerId
-                );
-
-            if (
-                !owner ||
-                owner.membership_status !== "active" ||
-                owner.role !== "owner"
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only the group owner can manage admins"
-                });
-            }
-
-            const result = await pool.query(
-                `
-                UPDATE cherychat_group_members
-                SET role = 'member'
-                WHERE group_id = $1
-                  AND user_id = $2
-                  AND role = 'admin'
-                  AND membership_status = 'active'
-                RETURNING user_id
-                `,
-                [groupId, targetUserId]
-            );
-
-            if (result.rows.length === 0) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Admin not found"
-                });
-            }
-
-            res.json({
-                success: true,
-                message:
-                    "Admin role removed"
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT REMOVE ADMIN ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!(await isAdminOrOwner(groupId, adminId))) {
+            return res.status(403).json({
                 success: false,
-                message:
-                    "Unable to remove admin role"
+                message: "Admin access required."
             });
         }
+
+        await pool.query(
+            `
+            UPDATE cherychat_group_members
+            SET role = 'member'
+            WHERE group_id = $1
+            AND user_id = $2
+            AND role = 'admin'
+            `,
+            [groupId, memberId]
+        );
+
+        res.json({
+            success: true,
+            message: "Admin role removed."
+        });
+    } catch (error) {
+        console.error("REMOVE ADMIN ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to remove admin role."
+        });
     }
-);
+});
 
 /* =========================================================
    UPDATE GROUP
 ========================================================= */
 
-app.put(
-    "/api/groups/:groupId",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
+app.put("/api/groups/:id", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.body.userId);
 
-            const ownerId =
-                toId(req.body.ownerId);
-
-            if (!groupId || !ownerId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid group ID and owner ID are required"
-                });
-            }
-
-            const existing =
-                await pool.query(
-                    `
-                    SELECT *
-                    FROM cherychat_groups
-                    WHERE id = $1
-                      AND owner_id = $2
-                    LIMIT 1
-                    `,
-                    [groupId, ownerId]
-                );
-
-            if (existing.rows.length === 0) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only the group owner can edit the group"
-                });
-            }
-
-            const oldGroup =
-                existing.rows[0];
-
-            const name =
-                req.body.name !== undefined
-                    ? cleanGroupName(req.body.name)
-                    : oldGroup.name;
-
-            const description =
-                req.body.description !== undefined
-                    ? cleanDescription(
-                        req.body.description
-                    )
-                    : oldGroup.description;
-
-            const privacy =
-                req.body.privacy !== undefined
-                    ? String(
-                        req.body.privacy
-                    ).toLowerCase()
-                    : oldGroup.privacy;
-
-            const joiningFee =
-                req.body.joiningFee !== undefined
-                    ? Number(req.body.joiningFee)
-                    : Number(oldGroup.joining_fee);
-
-            const groupPicture =
-                req.body.groupPicture !== undefined
-                    ? cleanText(
-                        req.body.groupPicture,
-                        1000000
-                    )
-                    : oldGroup.group_picture;
-
-            if (!name) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Group name cannot be empty"
-                });
-            }
-
-            if (
-                privacy !== "public" &&
-                privacy !== "private"
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Privacy must be public or private"
-                });
-            }
-
-            if (
-                !Number.isFinite(joiningFee) ||
-                joiningFee < 0
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Joining fee must be zero or positive"
-                });
-            }
-
-            const result = await pool.query(
-                `
-                UPDATE cherychat_groups
-                SET
-                    name = $1,
-                    description = $2,
-                    group_picture = $3,
-                    privacy = $4,
-                    joining_fee = $5,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = $6
-                  AND owner_id = $7
-                RETURNING *
-                `,
-                [
-                    name,
-                    description,
-                    groupPicture || null,
-                    privacy,
-                    joiningFee,
-                    groupId,
-                    ownerId
-                ]
-            );
-
-            const group =
-                result.rows[0];
-
-            res.json({
-                success: true,
-                message:
-                    "Group updated successfully",
-                group: formatGroup(group)
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT UPDATE GROUP ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!(await isAdminOrOwner(groupId, userId))) {
+            return res.status(403).json({
                 success: false,
-                message:
-                    "Unable to update group"
+                message: "Admin access required."
             });
         }
+
+        const name = cleanGroupName(req.body.name);
+        const description = cleanDescription(
+            req.body.description
+        );
+
+        if (!name) {
+            return res.status(400).json({
+                success: false,
+                message: "Group name is required."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            UPDATE cherychat_groups
+            SET name = $1,
+                description = $2
+            WHERE id = $3
+            RETURNING *
+            `,
+            [
+                name,
+                description,
+                groupId
+            ]
+        );
+
+        res.json({
+            success: true,
+            message: "Group updated.",
+            group: formatGroup(result.rows[0])
+        });
+    } catch (error) {
+        console.error("UPDATE GROUP ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to update group."
+        });
     }
-);
+});
 
 /* =========================================================
    DELETE GROUP
 ========================================================= */
 
-app.delete(
-    "/api/groups/:groupId",
-    async (req, res) => {
-        try {
-            const groupId =
-                toId(req.params.groupId);
+app.delete("/api/groups/:id", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.body.userId);
 
-            const ownerId =
-                toId(req.body.ownerId);
+        const group = await getGroup(groupId);
 
-            if (!groupId || !ownerId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid group ID and owner ID are required"
-                });
-            }
-
-            const result = await pool.query(
-                `
-                DELETE FROM cherychat_groups
-                WHERE id = $1
-                  AND owner_id = $2
-                RETURNING id
-                `,
-                [groupId, ownerId]
-            );
-
-            if (result.rows.length === 0) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only the group owner can delete this group"
-                });
-            }
-
-            res.json({
-                success: true,
-                message:
-                    "Group deleted successfully"
-            });
-
-        } catch (error) {
-            console.error(
-                "VIBECHAT DELETE GROUP ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!group) {
+            return res.status(404).json({
                 success: false,
-                message:
-                    "Unable to delete group"
+                message: "Group not found."
             });
         }
+
+        if (group.owner_id !== userId) {
+            return res.status(403).json({
+                success: false,
+                message: "Only the group owner can delete this group."
+            });
+        }
+
+        await pool.query(
+            `
+            DELETE FROM cherychat_groups
+            WHERE id = $1
+            `,
+            [groupId]
+        );
+
+        res.json({
+            success: true,
+            message: "Group deleted."
+        });
+    } catch (error) {
+        console.error("DELETE GROUP ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to delete group."
+        });
     }
-);
+});
 
 /* =========================================================
-   SERVER
+   INVITE GROUP
 ========================================================= */
 
-const PORT =
-    process.env.PORT || 3000;
-
-async function startServer() {
+app.get("/api/groups/:id/invite", async (req, res) => {
     try {
-        await initializeDatabase();
+        const groupId = toId(req.params.id);
+        const userId = toId(req.query.userId);
 
+        if (!(await isActiveMember(groupId, userId))) {
+            return res.status(403).json({
+                success: false,
+                message: "Group membership required."
+            });
+        }
+
+        const group = await getGroup(groupId);
+
+        res.json({
+            success: true,
+            inviteCode: group.invite_code,
+            inviteLink:
+                `https://cherychat.onrender.com/dashboard.html?group=${group.invite_code}`
+        });
+    } catch (error) {
+        console.error("INVITE ERROR:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to create invite."
+        });
+    }
+});
+
+/* =========================================================
+   START SERVER
+========================================================= */
+
+const PORT = process.env.PORT || 10000;
+
+initializeDatabase()
+    .then(() => {
         app.listen(PORT, () => {
             console.log(
-                `VibeChat Backend running on port ${PORT}`
+                `VibeChat backend running on port ${PORT}`
             );
         });
-
-    } catch (error) {
+    })
+    .catch(error => {
         console.error(
-            "VibeChat server failed to start:",
+            "DATABASE INITIALIZATION ERROR:",
             error
         );
 
         process.exit(1);
-    }
-}
-
-startServer();
+    });
