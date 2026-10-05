@@ -8,6 +8,9 @@ const app = express();
 
 app.use(cors());
 app.use(express.json({ limit: "20mb" }));
+app.use(express.urlencoded({ extended: true, limit: "20mb" }));
+
+const PORT = process.env.PORT || 10000;
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -26,8 +29,9 @@ function toId(value) {
     return Number.isInteger(id) && id > 0 ? id : null;
 }
 
-function cleanText(value, max = 1000) {
-    return String(value || "").trim().slice(0, max);
+function cleanText(value, max = 5000) {
+    if (value === undefined || value === null) return "";
+    return String(value).trim().slice(0, max);
 }
 
 function cleanGroupName(value) {
@@ -35,175 +39,177 @@ function cleanGroupName(value) {
 }
 
 function cleanDescription(value) {
-    return cleanText(value, 500);
+    return cleanText(value, 1000);
 }
 
 function generateInviteCode() {
-    return crypto.randomBytes(5).toString("hex").toUpperCase();
+    return crypto.randomBytes(6).toString("hex").toUpperCase();
 }
 
 function createAvatar(name) {
-    return (
-        "https://ui-avatars.com/api/?name=" +
-        encodeURIComponent(name || "User") +
-        "&background=241538&color=ffd54a&bold=true"
-    );
+    const safeName = cleanText(name, 100) || "VibeChat User";
+    return `https://ui-avatars.com/api/?name=${encodeURIComponent(
+        safeName
+    )}&background=120a22&color=ffd54a&bold=true`;
+}
+
+function formatUser(user) {
+    if (!user) return null;
+
+    return {
+        id: user.id,
+        userId: user.id,
+        fullName: user.full_name,
+        email: user.email,
+        phone: user.phone,
+        profilePicture: user.profile_picture || createAvatar(user.full_name),
+        about: user.about || "using VibeChat",
+        isOnline: Boolean(user.is_online),
+        lastSeen: user.last_seen,
+        createdAt: user.created_at
+    };
+}
+
+function formatGroup(group) {
+    if (!group) return null;
+
+    return {
+        id: group.id,
+        groupId: group.id,
+        name: group.name,
+        description: group.description || "",
+        groupType: group.group_type,
+        visibility: group.visibility,
+        inviteCode: group.invite_code,
+        ownerId: group.owner_id,
+        ownerName: group.owner_name || null,
+        ownerProfilePicture: group.owner_profile_picture || null,
+        memberCount: Number(group.member_count || 0),
+        createdAt: group.created_at,
+        membership: group.membership || null
+    };
+}
+
+function formatStory(story) {
+    if (!story) return null;
+
+    return {
+        id: story.id,
+        userId: story.user_id,
+        fullName: story.full_name,
+        profilePicture:
+            story.profile_picture || createAvatar(story.full_name),
+        mediaType: story.media_type,
+        mediaData: story.media_data,
+        caption: story.caption || "",
+        createdAt: story.created_at,
+        expiresAt: story.expires_at
+    };
+}
+
+function formatPrivateMessage(message) {
+    return {
+        id: message.id,
+        conversationId: message.conversation_id,
+        senderId: message.sender_id,
+        receiverId: message.receiver_id,
+        messageText: message.message_text,
+        isRead: Boolean(message.is_read),
+        createdAt: message.created_at
+    };
+}
+
+function formatGroupMessage(message) {
+    return {
+        id: message.id,
+        groupId: message.group_id,
+        senderId: message.sender_id,
+        senderName: message.sender_name,
+        senderProfilePicture:
+            message.sender_profile_picture ||
+            createAvatar(message.sender_name),
+        messageText: message.message_text,
+        createdAt: message.created_at
+    };
 }
 
 async function userExists(userId) {
+    const id = toId(userId);
+
+    if (!id) return false;
+
     const result = await pool.query(
-        "SELECT id FROM cherychat_users WHERE id = $1",
-        [userId]
+        `SELECT id FROM cherychat_users WHERE id = $1`,
+        [id]
     );
 
     return result.rows.length > 0;
 }
 
 async function getGroup(groupId) {
+    const id = toId(groupId);
+
+    if (!id) return null;
+
     const result = await pool.query(
-        "SELECT * FROM cherychat_groups WHERE id = $1",
-        [groupId]
+        `
+        SELECT
+            g.*,
+            u.full_name AS owner_name,
+            u.profile_picture AS owner_profile_picture,
+            (
+                SELECT COUNT(*)
+                FROM cherychat_group_members gm
+                WHERE gm.group_id = g.id
+                  AND gm.status = 'active'
+            ) AS member_count
+        FROM cherychat_groups g
+        LEFT JOIN cherychat_users u
+            ON u.id = g.owner_id
+        WHERE g.id = $1
+        `,
+        [id]
     );
 
     return result.rows[0] || null;
 }
 
 async function getMembership(groupId, userId) {
+    const gid = toId(groupId);
+    const uid = toId(userId);
+
+    if (!gid || !uid) return null;
+
     const result = await pool.query(
         `
         SELECT *
         FROM cherychat_group_members
         WHERE group_id = $1
-        AND user_id = $2
+          AND user_id = $2
+        LIMIT 1
         `,
-        [groupId, userId]
+        [gid, uid]
     );
 
     return result.rows[0] || null;
 }
 
 async function isActiveMember(groupId, userId) {
-    const result = await pool.query(
-        `
-        SELECT id
-        FROM cherychat_group_members
-        WHERE group_id = $1
-        AND user_id = $2
-        AND status = 'active'
-        `,
-        [groupId, userId]
-    );
+    const membership = await getMembership(groupId, userId);
 
-    return result.rows.length > 0;
+    return Boolean(
+        membership && membership.status === "active"
+    );
 }
 
 async function isAdminOrOwner(groupId, userId) {
-    const result = await pool.query(
-        `
-        SELECT role
-        FROM cherychat_group_members
-        WHERE group_id = $1
-        AND user_id = $2
-        AND status = 'active'
-        `,
-        [groupId, userId]
+    const membership = await getMembership(groupId, userId);
+
+    return Boolean(
+        membership &&
+        membership.status === "active" &&
+        (membership.role === "admin" || membership.role === "owner")
     );
-
-    if (!result.rows.length) return false;
-
-    return ["owner", "admin"].includes(result.rows[0].role);
-}
-
-function formatUser(row) {
-    if (!row) return null;
-
-    return {
-        id: row.id,
-        fullName: row.full_name,
-        full_name: row.full_name,
-        email: row.email,
-        phone: row.phone,
-
-        profilePicture:
-            row.profile_picture ||
-            createAvatar(row.full_name),
-
-        profile_picture:
-            row.profile_picture ||
-            createAvatar(row.full_name),
-
-        about:
-            row.about ||
-            "Hey there! I am using VibeChat.",
-
-        isOnline: !!row.is_online,
-        is_online: !!row.is_online,
-
-        lastSeen: row.last_seen,
-        last_seen: row.last_seen,
-
-        createdAt: row.created_at
-    };
-}
-
-function formatGroup(row) {
-    if (!row) return null;
-
-    return {
-        id: row.id,
-        name: row.name,
-        description: row.description || "",
-
-        groupType: row.group_type,
-        group_type: row.group_type,
-
-        visibility: row.visibility,
-
-        inviteCode: row.invite_code,
-        invite_code: row.invite_code,
-
-        ownerId: row.owner_id,
-        owner_id: row.owner_id,
-
-        createdAt: row.created_at
-    };
-}
-
-/* =========================================================
-   STORY FORMATTER
-========================================================= */
-
-function formatStory(row, currentUserId = null) {
-    if (!row) return null;
-
-    return {
-        id: row.id,
-        userId: row.user_id,
-
-        fullName: row.full_name,
-
-        profilePicture:
-            row.profile_picture ||
-            createAvatar(row.full_name),
-
-        mediaType: row.media_type,
-        mediaData: row.media_data,
-
-        caption: row.caption || "",
-
-        createdAt: row.created_at,
-        expiresAt: row.expires_at,
-
-        viewCount:
-            Number(row.view_count || 0),
-
-        viewedByMe:
-            !!row.viewed_by_me,
-
-        isOwn:
-            currentUserId !== null &&
-            Number(row.user_id) === Number(currentUserId)
-    };
 }
 
 /* =========================================================
@@ -211,286 +217,165 @@ function formatStory(row, currentUserId = null) {
 ========================================================= */
 
 async function initializeDatabase() {
-
-    /* =====================================================
-       USERS
-    ===================================================== */
-
     await pool.query(`
         CREATE TABLE IF NOT EXISTS cherychat_users (
             id SERIAL PRIMARY KEY,
-
-            full_name VARCHAR(100) NOT NULL,
-
+            full_name VARCHAR(150) NOT NULL,
             email VARCHAR(255) UNIQUE NOT NULL,
-
-            phone VARCHAR(30) UNIQUE NOT NULL,
-
+            phone VARCHAR(50) UNIQUE NOT NULL,
             password_hash TEXT NOT NULL,
-
             profile_picture TEXT,
-
-            about TEXT DEFAULT
-                'Hey there! I am using VibeChat.',
-
+            about TEXT DEFAULT 'using VibeChat',
             is_online BOOLEAN DEFAULT FALSE,
-
             last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     `);
-
-    /* =====================================================
-       CONVERSATIONS
-    ===================================================== */
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS cherychat_conversations (
             id SERIAL PRIMARY KEY,
-
-            user_one INTEGER NOT NULL
-                REFERENCES cherychat_users(id)
-                ON DELETE CASCADE,
-
-            user_two INTEGER NOT NULL
-                REFERENCES cherychat_users(id)
-                ON DELETE CASCADE,
-
+            user_one INTEGER NOT NULL REFERENCES cherychat_users(id) ON DELETE CASCADE,
+            user_two INTEGER NOT NULL REFERENCES cherychat_users(id) ON DELETE CASCADE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
             UNIQUE(user_one, user_two),
-
             CHECK(user_one <> user_two)
         )
     `);
 
-    /* =====================================================
-       PRIVATE MESSAGES
-    ===================================================== */
-
     await pool.query(`
         CREATE TABLE IF NOT EXISTS cherychat_messages (
             id SERIAL PRIMARY KEY,
-
             conversation_id INTEGER NOT NULL
-                REFERENCES cherychat_conversations(id)
-                ON DELETE CASCADE,
-
+                REFERENCES cherychat_conversations(id) ON DELETE CASCADE,
             sender_id INTEGER NOT NULL
-                REFERENCES cherychat_users(id)
-                ON DELETE CASCADE,
-
+                REFERENCES cherychat_users(id) ON DELETE CASCADE,
+            receiver_id INTEGER NOT NULL
+                REFERENCES cherychat_users(id) ON DELETE CASCADE,
             message_text TEXT NOT NULL,
-
             is_read BOOLEAN DEFAULT FALSE,
-
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     `);
-
-    /* =====================================================
-       GROUPS
-    ===================================================== */
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS cherychat_groups (
             id SERIAL PRIMARY KEY,
-
             name VARCHAR(100) NOT NULL,
-
             description TEXT DEFAULT '',
-
-            group_type VARCHAR(20) DEFAULT 'public',
-
-            visibility VARCHAR(20) DEFAULT 'public',
-
-            invite_code VARCHAR(30) UNIQUE NOT NULL,
-
+            group_type VARCHAR(20) NOT NULL DEFAULT 'public',
+            visibility VARCHAR(20) NOT NULL DEFAULT 'public',
+            invite_code VARCHAR(50) UNIQUE NOT NULL,
             owner_id INTEGER NOT NULL
-                REFERENCES cherychat_users(id)
-                ON DELETE CASCADE,
-
+                REFERENCES cherychat_users(id) ON DELETE CASCADE,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     `);
-
-    /* =====================================================
-       GROUP MEMBERS
-    ===================================================== */
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS cherychat_group_members (
             id SERIAL PRIMARY KEY,
-
             group_id INTEGER NOT NULL
-                REFERENCES cherychat_groups(id)
-                ON DELETE CASCADE,
-
+                REFERENCES cherychat_groups(id) ON DELETE CASCADE,
             user_id INTEGER NOT NULL
-                REFERENCES cherychat_users(id)
-                ON DELETE CASCADE,
-
-            role VARCHAR(20) DEFAULT 'member',
-
-            status VARCHAR(20) DEFAULT 'active',
-
-            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
+                REFERENCES cherychat_users(id) ON DELETE CASCADE,
+            role VARCHAR(20) NOT NULL DEFAULT 'member',
+            status VARCHAR(20) NOT NULL DEFAULT 'active',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             UNIQUE(group_id, user_id)
         )
     `);
-
-    /* =====================================================
-       GROUP JOIN REQUESTS
-    ===================================================== */
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS cherychat_group_join_requests (
             id SERIAL PRIMARY KEY,
-
             group_id INTEGER NOT NULL
-                REFERENCES cherychat_groups(id)
-                ON DELETE CASCADE,
-
+                REFERENCES cherychat_groups(id) ON DELETE CASCADE,
             user_id INTEGER NOT NULL
-                REFERENCES cherychat_users(id)
-                ON DELETE CASCADE,
-
-            status VARCHAR(20) DEFAULT 'pending',
-
+                REFERENCES cherychat_users(id) ON DELETE CASCADE,
+            status VARCHAR(20) NOT NULL DEFAULT 'pending',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
             UNIQUE(group_id, user_id)
         )
     `);
 
-    /* =====================================================
-       GROUP MESSAGES
-    ===================================================== */
-
     await pool.query(`
         CREATE TABLE IF NOT EXISTS cherychat_group_messages (
             id SERIAL PRIMARY KEY,
-
             group_id INTEGER NOT NULL
-                REFERENCES cherychat_groups(id)
-                ON DELETE CASCADE,
-
+                REFERENCES cherychat_groups(id) ON DELETE CASCADE,
             sender_id INTEGER NOT NULL
-                REFERENCES cherychat_users(id)
-                ON DELETE CASCADE,
-
+                REFERENCES cherychat_users(id) ON DELETE CASCADE,
             message_text TEXT NOT NULL,
-
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     `);
-
-    /* =====================================================
-       GROUP PAYMENTS
-    ===================================================== */
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS cherychat_group_payments (
             id SERIAL PRIMARY KEY,
-
             group_id INTEGER NOT NULL
-                REFERENCES cherychat_groups(id)
-                ON DELETE CASCADE,
-
+                REFERENCES cherychat_groups(id) ON DELETE CASCADE,
             user_id INTEGER NOT NULL
-                REFERENCES cherychat_users(id)
-                ON DELETE CASCADE,
-
-            amount NUMERIC(12,2) DEFAULT 0,
-
-            reference VARCHAR(100),
-
+                REFERENCES cherychat_users(id) ON DELETE CASCADE,
+            amount NUMERIC(12,2) NOT NULL DEFAULT 0,
+            currency VARCHAR(10) DEFAULT 'KES',
             status VARCHAR(30) DEFAULT 'pending',
-
+            reference VARCHAR(150),
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     `);
 
-    /* =====================================================
-       STORIES / STATUS
-    ===================================================== */
-
     await pool.query(`
         CREATE TABLE IF NOT EXISTS cherychat_stories (
             id SERIAL PRIMARY KEY,
-
             user_id INTEGER NOT NULL
-                REFERENCES cherychat_users(id)
-                ON DELETE CASCADE,
-
-            media_type VARCHAR(20) NOT NULL
-                CHECK(media_type IN ('image', 'video')),
-
+                REFERENCES cherychat_users(id) ON DELETE CASCADE,
+            media_type VARCHAR(20) NOT NULL,
             media_data TEXT NOT NULL,
-
             caption TEXT DEFAULT '',
-
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
-            expires_at TIMESTAMP NOT NULL
-                DEFAULT (
-                    CURRENT_TIMESTAMP +
-                    INTERVAL '24 hours'
-                )
+            expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '24 hours')
         )
     `);
-
-    /* =====================================================
-       STORY VIEWS
-    ===================================================== */
 
     await pool.query(`
         CREATE TABLE IF NOT EXISTS cherychat_story_views (
             id SERIAL PRIMARY KEY,
-
             story_id INTEGER NOT NULL
-                REFERENCES cherychat_stories(id)
-                ON DELETE CASCADE,
-
+                REFERENCES cherychat_stories(id) ON DELETE CASCADE,
             viewer_id INTEGER NOT NULL
-                REFERENCES cherychat_users(id)
-                ON DELETE CASCADE,
-
+                REFERENCES cherychat_users(id) ON DELETE CASCADE,
             viewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-
             UNIQUE(story_id, viewer_id)
         )
     `);
 
-    /* =====================================================
-       STORY INDEXES
-    ===================================================== */
-
     await pool.query(`
-        CREATE INDEX IF NOT EXISTS
-        idx_cherychat_stories_user
-        ON cherychat_stories(user_id)
+        CREATE INDEX IF NOT EXISTS idx_cherychat_messages_conversation
+        ON cherychat_messages(conversation_id, created_at)
     `);
 
     await pool.query(`
-        CREATE INDEX IF NOT EXISTS
-        idx_cherychat_stories_expiry
-        ON cherychat_stories(expires_at)
+        CREATE INDEX IF NOT EXISTS idx_cherychat_group_messages
+        ON cherychat_group_messages(group_id, created_at)
     `);
 
     await pool.query(`
-        CREATE INDEX IF NOT EXISTS
-        idx_cherychat_story_views_story
-        ON cherychat_story_views(story_id)
+        CREATE INDEX IF NOT EXISTS idx_cherychat_stories_user
+        ON cherychat_stories(user_id, expires_at)
     `);
 
-    console.log("VibeChat database ready.");
+    await pool.query(`
+        CREATE INDEX IF NOT EXISTS idx_cherychat_story_views
+        ON cherychat_story_views(story_id, viewer_id)
+    `);
+
+    console.log("VibeChat database initialized.");
 }
 
 /* =========================================================
-   ROOT
+   BASIC ROUTES
 ========================================================= */
 
 app.get("/", (req, res) => {
@@ -501,636 +386,307 @@ app.get("/", (req, res) => {
     });
 });
 
-app.get("/api/test", (req, res) => {
+app.get("/health", (req, res) => {
     res.json({
         success: true,
-        message: "VibeChat API is working."
+        status: "ok",
+        app: "VibeChat"
     });
 });
 
+app.get("/api/test", async (req, res) => {
+    try {
+        await pool.query("SELECT 1");
+
+        res.json({
+            success: true,
+            message: "VibeChat API is working."
+        });
+    } catch (error) {
+        console.error("API test error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Database connection failed."
+        });
+    }
+});
+
 /* =========================================================
-   REGISTER
+   AUTH
 ========================================================= */
 
 app.post("/api/register", async (req, res) => {
     try {
+        const fullName = cleanText(req.body.fullName, 150);
+        const email = cleanText(req.body.email, 255).toLowerCase();
+        const phone = cleanText(req.body.phone, 50);
+        const password = String(req.body.password || "");
 
-        const fullName = cleanText(
-            req.body.fullName ||
-            req.body.full_name,
-            100
-        );
-
-        const email = cleanText(
-            req.body.email,
-            255
-        ).toLowerCase();
-
-        const phone = cleanText(
-            req.body.phone,
-            30
-        );
-
-        const password =
-            String(req.body.password || "");
-
-        if (
-            !fullName ||
-            !email ||
-            !phone ||
-            !password
-        ) {
+        if (!fullName || !email || !phone || !password) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Please fill in all required fields."
+                message: "All registration fields are required."
             });
         }
 
         if (password.length < 6) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Password must be at least 6 characters."
+                message: "Password must be at least 6 characters."
             });
         }
 
-        const existing =
-            await pool.query(
-                `
-                SELECT id
-                FROM cherychat_users
-                WHERE LOWER(email) = LOWER($1)
-                OR phone = $2
-                `,
-                [email, phone]
-            );
+        const existing = await pool.query(
+            `
+            SELECT id
+            FROM cherychat_users
+            WHERE LOWER(email) = LOWER($1)
+               OR phone = $2
+            LIMIT 1
+            `,
+            [email, phone]
+        );
 
-        if (existing.rows.length) {
+        if (existing.rows.length > 0) {
             return res.status(409).json({
                 success: false,
-                message:
-                    "Email or phone number is already registered."
+                message: "An account with that email or phone already exists."
             });
         }
 
-        const passwordHash =
-            await bcrypt.hash(password, 10);
+        const passwordHash = await bcrypt.hash(password, 12);
 
-        const result =
-            await pool.query(
-                `
-                INSERT INTO cherychat_users
-                (
-                    full_name,
-                    email,
-                    phone,
-                    password_hash,
-                    about,
-                    is_online
-                )
-                VALUES
-                ($1, $2, $3, $4, $5, FALSE)
-
-                RETURNING
-                    id,
-                    full_name,
-                    email,
-                    phone,
-                    profile_picture,
-                    about,
-                    is_online,
-                    last_seen,
-                    created_at
-                `,
-                [
-                    fullName,
-                    email,
-                    phone,
-                    passwordHash,
-                    "Hey there! I am using VibeChat."
-                ]
-            );
+        const result = await pool.query(
+            `
+            INSERT INTO cherychat_users
+                (full_name, email, phone, password_hash, profile_picture, about)
+            VALUES
+                ($1, $2, $3, $4, $5, $6)
+            RETURNING *
+            `,
+            [
+                fullName,
+                email,
+                phone,
+                passwordHash,
+                createAvatar(fullName),
+                "using VibeChat"
+            ]
+        );
 
         res.status(201).json({
             success: true,
-            message: "Registration successful.",
-            user: formatUser(
-                result.rows[0]
-            )
+            message: "VibeChat account created successfully.",
+            user: formatUser(result.rows[0])
         });
-
     } catch (error) {
-
-        console.error(
-            "REGISTER ERROR:",
-            error
-        );
+        console.error("Register error:", error);
 
         res.status(500).json({
             success: false,
-            message:
-                "Unable to register user."
+            message: "Registration failed."
         });
     }
 });
 
-/* =========================================================
-   LOGIN
-========================================================= */
-
 app.post("/api/login", async (req, res) => {
     try {
+        const identifier = cleanText(
+            req.body.email || req.body.phone || req.body.identifier,
+            255
+        ).toLowerCase();
 
-        const identifier =
-            cleanText(
-                req.body.email ||
-                req.body.phone ||
-                req.body.identifier,
-                255
-            );
-
-        const password =
-            String(req.body.password || "");
+        const password = String(req.body.password || "");
 
         if (!identifier || !password) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Enter your email/phone and password."
+                message: "Email/phone and password are required."
             });
         }
 
-        const result =
-            await pool.query(
-                `
-                SELECT *
-                FROM cherychat_users
-                WHERE LOWER(email) = LOWER($1)
-                OR phone = $1
-                LIMIT 1
-                `,
-                [identifier]
-            );
+        const result = await pool.query(
+            `
+            SELECT *
+            FROM cherychat_users
+            WHERE LOWER(email) = LOWER($1)
+               OR phone = $1
+            LIMIT 1
+            `,
+            [identifier]
+        );
 
-        if (!result.rows.length) {
+        if (result.rows.length === 0) {
             return res.status(401).json({
                 success: false,
-                message:
-                    "Invalid login details."
+                message: "Invalid login details."
             });
         }
 
-        const userRow =
-            result.rows[0];
+        const user = result.rows[0];
 
-        const validPassword =
-            await bcrypt.compare(
-                password,
-                userRow.password_hash
-            );
+        const passwordMatches = await bcrypt.compare(
+            password,
+            user.password_hash
+        );
 
-        if (!validPassword) {
+        if (!passwordMatches) {
             return res.status(401).json({
                 success: false,
-                message:
-                    "Invalid login details."
+                message: "Invalid login details."
             });
         }
 
         await pool.query(
             `
             UPDATE cherychat_users
-            SET
-                is_online = TRUE,
+            SET is_online = TRUE,
                 last_seen = CURRENT_TIMESTAMP
             WHERE id = $1
             `,
-            [userRow.id]
+            [user.id]
         );
 
-        userRow.is_online = true;
+        user.is_online = true;
+        user.last_seen = new Date();
 
         res.json({
             success: true,
             message: "Login successful.",
-            user: formatUser(userRow)
+            user: formatUser(user)
         });
-
     } catch (error) {
-
-        console.error(
-            "LOGIN ERROR:",
-            error
-        );
+        console.error("Login error:", error);
 
         res.status(500).json({
             success: false,
-            message:
-                "Unable to login."
+            message: "Login failed."
         });
     }
 });
 
 /* =========================================================
-   USER ONLINE
+   USERS
 ========================================================= */
 
 app.put("/api/users/:id/online", async (req, res) => {
     try {
+        const id = toId(req.params.id);
 
-        const userId =
-            toId(req.params.id);
-
-        if (!userId) {
-            return res.status(400).json({
+        if (!id || !(await userExists(id))) {
+            return res.status(404).json({
                 success: false,
-                message:
-                    "Invalid user ID."
+                message: "User not found."
             });
         }
 
-        await pool.query(
+        const result = await pool.query(
             `
             UPDATE cherychat_users
-            SET
-                is_online = TRUE,
+            SET is_online = TRUE,
                 last_seen = CURRENT_TIMESTAMP
             WHERE id = $1
+            RETURNING *
             `,
-            [userId]
+            [id]
         );
 
         res.json({
-            success: true
+            success: true,
+            user: formatUser(result.rows[0])
         });
-
     } catch (error) {
-
-        console.error(
-            "ONLINE ERROR:",
-            error
-        );
+        console.error("Online status error:", error);
 
         res.status(500).json({
             success: false,
-            message:
-                "Unable to update online status."
+            message: "Unable to update online status."
         });
     }
 });
-
-/* =========================================================
-   USER OFFLINE
-========================================================= */
 
 app.put("/api/users/:id/offline", async (req, res) => {
     try {
+        const id = toId(req.params.id);
 
-        const userId =
-            toId(req.params.id);
-
-        if (!userId) {
-            return res.status(400).json({
+        if (!id || !(await userExists(id))) {
+            return res.status(404).json({
                 success: false,
-                message:
-                    "Invalid user ID."
+                message: "User not found."
             });
         }
 
-        await pool.query(
+        const result = await pool.query(
             `
             UPDATE cherychat_users
-            SET
-                is_online = FALSE,
+            SET is_online = FALSE,
                 last_seen = CURRENT_TIMESTAMP
             WHERE id = $1
+            RETURNING *
             `,
-            [userId]
+            [id]
         );
 
         res.json({
-            success: true
+            success: true,
+            user: formatUser(result.rows[0])
         });
-
     } catch (error) {
-
-        console.error(
-            "OFFLINE ERROR:",
-            error
-        );
+        console.error("Offline status error:", error);
 
         res.status(500).json({
             success: false,
-            message:
-                "Unable to update offline status."
+            message: "Unable to update offline status."
         });
     }
 });
 
-/* =========================================================
-   PROFILE PICTURE
-========================================================= */
-
-app.put(
-    "/api/users/:id/profile-picture",
-    async (req, res) => {
-
-        try {
-
-            const userId =
-                toId(req.params.id);
-
-            const profilePicture =
-                String(
-                    req.body.profilePicture || ""
-                ).trim();
-
-            if (!userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid user ID is required."
-                });
-            }
-
-            if (!profilePicture) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Profile picture is required."
-                });
-            }
-
-            const imagePattern =
-                /^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=\s]+$/i;
-
-            if (!imagePattern.test(profilePicture)) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Please upload a valid JPG, PNG or WEBP image."
-                });
-            }
-
-            const base64Part =
-                profilePicture.split(",")[1] || "";
-
-            const estimatedBytes =
-                Math.ceil(
-                    (base64Part.length * 3) / 4
-                );
-
-            if (
-                estimatedBytes >
-                2 * 1024 * 1024
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Profile picture must be 2MB or smaller."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    UPDATE cherychat_users
-                    SET profile_picture = $1
-                    WHERE id = $2
-
-                    RETURNING
-                        id,
-                        full_name,
-                        email,
-                        phone,
-                        profile_picture,
-                        about,
-                        is_online,
-                        last_seen,
-                        created_at
-                    `,
-                    [
-                        profilePicture,
-                        userId
-                    ]
-                );
-
-            if (!result.rows.length) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "User not found."
-                });
-            }
-
-            res.json({
-                success: true,
-                message:
-                    "Profile picture updated successfully.",
-                user:
-                    formatUser(
-                        result.rows[0]
-                    )
-            });
-
-        } catch (error) {
-
-            console.error(
-                "PROFILE PICTURE ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to update profile picture."
-            });
-        }
-    }
-);
-
-/* =========================================================
-   UPDATE PROFILE
-========================================================= */
-
-app.put(
-    "/api/users/:id/profile",
-    async (req, res) => {
-
-        try {
-
-            const userId =
-                toId(req.params.id);
-
-            const fullName =
-                cleanText(
-                    req.body.fullName ||
-                    req.body.full_name,
-                    100
-                );
-
-            const about =
-                cleanText(
-                    req.body.about,
-                    300
-                );
-
-            if (!userId || !fullName) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Name is required."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    UPDATE cherychat_users
-                    SET
-                        full_name = $1,
-                        about = $2
-                    WHERE id = $3
-
-                    RETURNING
-                        id,
-                        full_name,
-                        email,
-                        phone,
-                        profile_picture,
-                        about,
-                        is_online,
-                        last_seen,
-                        created_at
-                    `,
-                    [
-                        fullName,
-                        about ||
-                            "Hey there! I am using VibeChat.",
-                        userId
-                    ]
-                );
-
-            if (!result.rows.length) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "User not found."
-                });
-            }
-
-            res.json({
-                success: true,
-                message:
-                    "Profile updated successfully.",
-                user:
-                    formatUser(
-                        result.rows[0]
-                    )
-            });
-
-        } catch (error) {
-
-            console.error(
-                "PROFILE UPDATE ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to update profile."
-            });
-        }
-    }
-);
-
-/* =========================================================
-   GET USER
-========================================================= */
-
 app.get("/api/users/:id", async (req, res) => {
     try {
+        const id = toId(req.params.id);
 
-        const userId =
-            toId(req.params.id);
-
-        if (!userId) {
+        if (!id) {
             return res.status(400).json({
                 success: false,
-                message:
-                    "Invalid user ID."
+                message: "Invalid user ID."
             });
         }
 
-        const result =
-            await pool.query(
-                `
-                SELECT
-                    id,
-                    full_name,
-                    email,
-                    phone,
-                    profile_picture,
-                    about,
-                    is_online,
-                    last_seen,
-                    created_at
-                FROM cherychat_users
-                WHERE id = $1
-                `,
-                [userId]
-            );
+        const result = await pool.query(
+            `
+            SELECT *
+            FROM cherychat_users
+            WHERE id = $1
+            `,
+            [id]
+        );
 
-        if (!result.rows.length) {
+        if (result.rows.length === 0) {
             return res.status(404).json({
                 success: false,
-                message:
-                    "User not found."
+                message: "User not found."
             });
         }
 
         res.json({
             success: true,
-            user:
-                formatUser(
-                    result.rows[0]
-                )
+            user: formatUser(result.rows[0])
         });
-
     } catch (error) {
-
-        console.error(
-            "GET USER ERROR:",
-            error
-        );
+        console.error("Get user error:", error);
 
         res.status(500).json({
             success: false,
-            message:
-                "Unable to get user."
+            message: "Unable to load user."
         });
     }
 });
 
-/* =========================================================
-   SEARCH USERS
-========================================================= */
-
 app.get("/api/users/search", async (req, res) => {
     try {
-
-        const q =
-            cleanText(
-                req.query.q,
-                100
-            );
-
-        const currentUserId =
-            toId(
-                req.query.userId
-            );
+        const q = cleanText(req.query.q, 100);
+        const userId = toId(req.query.userId);
 
         if (!q) {
             return res.json({
@@ -1139,2580 +695,1569 @@ app.get("/api/users/search", async (req, res) => {
             });
         }
 
-        const result =
-            await pool.query(
-                `
-                SELECT
-                    id,
-                    full_name,
-                    email,
-                    phone,
-                    profile_picture,
-                    about,
-                    is_online,
-                    last_seen
-                FROM cherychat_users
+        const searchTerm = `%${q}%`;
 
-                WHERE
-                    (
-                        full_name ILIKE $1
-                        OR email ILIKE $1
-                        OR phone ILIKE $1
-                    )
-
-                    AND
-                    (
-                        $2::INTEGER IS NULL
-                        OR id <> $2
-                    )
-
-                ORDER BY
-                    CASE
-                        WHEN
-                            LOWER(full_name)
-                            =
-                            LOWER($3)
-                        THEN 0
-                        ELSE 1
-                    END,
-
-                    full_name ASC
-
-                LIMIT 30
-                `,
-                [
-                    `%${q}%`,
-                    currentUserId,
-                    q
-                ]
-            );
+        const result = await pool.query(
+            `
+            SELECT *
+            FROM cherychat_users
+            WHERE
+                (
+                    full_name ILIKE $1
+                    OR email ILIKE $1
+                    OR phone ILIKE $1
+                )
+                AND ($2::INTEGER IS NULL OR id <> $2)
+            ORDER BY
+                CASE
+                    WHEN full_name ILIKE $3 THEN 0
+                    ELSE 1
+                END,
+                full_name ASC
+            LIMIT 30
+            `,
+            [searchTerm, userId, `${q}%`]
+        );
 
         res.json({
             success: true,
-            users:
-                result.rows.map(
-                    formatUser
-                )
+            users: result.rows.map(formatUser)
         });
-
     } catch (error) {
-
-        console.error(
-            "SEARCH USERS ERROR:",
-            error
-        );
+        console.error("User search error:", error);
 
         res.status(500).json({
             success: false,
-            message:
-                "Unable to search users."
+            message: "User search failed."
+        });
+    }
+});
+
+app.put("/api/users/:id/profile", async (req, res) => {
+    try {
+        const id = toId(req.params.id);
+
+        if (!id || !(await userExists(id))) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found."
+            });
+        }
+
+        const fullName = cleanText(req.body.fullName, 150);
+        const about = cleanText(req.body.about, 500);
+        const phone = cleanText(req.body.phone, 50);
+
+        if (!fullName) {
+            return res.status(400).json({
+                success: false,
+                message: "Full name is required."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            UPDATE cherychat_users
+            SET full_name = $1,
+                about = $2,
+                phone = COALESCE(NULLIF($3, ''), phone)
+            WHERE id = $4
+            RETURNING *
+            `,
+            [fullName, about || "using VibeChat", phone, id]
+        );
+
+        res.json({
+            success: true,
+            message: "Profile updated successfully.",
+            user: formatUser(result.rows[0])
+        });
+    } catch (error) {
+        console.error("Profile update error:", error);
+
+        if (error.code === "23505") {
+            return res.status(409).json({
+                success: false,
+                message: "That phone number is already in use."
+            });
+        }
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to update profile."
+        });
+    }
+});
+
+app.put("/api/users/:id/profile-picture", async (req, res) => {
+    try {
+        const id = toId(req.params.id);
+
+        if (!id || !(await userExists(id))) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found."
+            });
+        }
+
+        const profilePicture = cleanText(
+            req.body.profilePicture || req.body.image || req.body.imageData,
+            5000000
+        );
+
+        if (!profilePicture) {
+            return res.status(400).json({
+                success: false,
+                message: "Profile picture is required."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            UPDATE cherychat_users
+            SET profile_picture = $1
+            WHERE id = $2
+            RETURNING *
+            `,
+            [profilePicture, id]
+        );
+
+        res.json({
+            success: true,
+            message: "Profile picture updated successfully.",
+            user: formatUser(result.rows[0])
+        });
+    } catch (error) {
+        console.error("Profile picture error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to update profile picture."
         });
     }
 });
 
 /* =========================================================
-   CREATE / GET CONVERSATION
+   PRIVATE CONVERSATIONS
 ========================================================= */
 
-app.post(
-    "/api/conversations",
-    async (req, res) => {
+app.post("/api/conversations", async (req, res) => {
+    try {
+        const userId = toId(req.body.userId);
+        const otherUserId = toId(req.body.otherUserId);
 
-        try {
-
-            const userId =
-                toId(
-                    req.body.userId
-                );
-
-            const otherUserId =
-                toId(
-                    req.body.otherUserId
-                );
-
-            if (
-                !userId ||
-                !otherUserId ||
-                userId === otherUserId
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Invalid users."
-                });
-            }
-
-            if (
-                !(await userExists(userId)) ||
-                !(await userExists(otherUserId))
-            ) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "User not found."
-                });
-            }
-
-            const one =
-                Math.min(
-                    userId,
-                    otherUserId
-                );
-
-            const two =
-                Math.max(
-                    userId,
-                    otherUserId
-                );
-
-            const result =
-                await pool.query(
-                    `
-                    INSERT INTO
-                        cherychat_conversations
-                    (
-                        user_one,
-                        user_two
-                    )
-                    VALUES ($1, $2)
-
-                    ON CONFLICT
-                    (user_one, user_two)
-
-                    DO UPDATE SET
-                        user_one =
-                            EXCLUDED.user_one
-
-                    RETURNING
-                        id,
-                        user_one,
-                        user_two,
-                        created_at
-                    `,
-                    [one, two]
-                );
-
-            res.json({
-                success: true,
-                conversation:
-                    result.rows[0]
-            });
-
-        } catch (error) {
-
-            console.error(
-                "CREATE CONVERSATION ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!userId || !otherUserId || userId === otherUserId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to create conversation."
+                message: "Valid users are required."
             });
         }
-    }
-);
 
-/* =========================================================
-   GET CONVERSATIONS
-========================================================= */
-
-app.get(
-    "/api/conversations",
-    async (req, res) => {
-
-        try {
-
-            const userId =
-                toId(
-                    req.query.userId
-                );
-
-            if (!userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid user ID is required."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT
-                        c.id,
-                        c.created_at,
-
-                        u.id AS other_id,
-                        u.full_name AS other_name,
-                        u.email AS other_email,
-                        u.phone AS other_phone,
-                        u.profile_picture AS other_picture,
-                        u.about AS other_about,
-                        u.is_online AS other_online,
-                        u.last_seen AS other_last_seen,
-
-                        (
-                            SELECT
-                                m.message_text
-                            FROM cherychat_messages m
-                            WHERE
-                                m.conversation_id = c.id
-                            ORDER BY
-                                m.created_at DESC
-                            LIMIT 1
-                        ) AS last_message,
-
-                        (
-                            SELECT
-                                m.created_at
-                            FROM cherychat_messages m
-                            WHERE
-                                m.conversation_id = c.id
-                            ORDER BY
-                                m.created_at DESC
-                            LIMIT 1
-                        ) AS last_message_time
-
-                    FROM cherychat_conversations c
-
-                    JOIN cherychat_users u
-                    ON u.id =
-                        CASE
-                            WHEN c.user_one = $1
-                            THEN c.user_two
-                            ELSE c.user_one
-                        END
-
-                    WHERE
-                        c.user_one = $1
-                        OR c.user_two = $1
-
-                    ORDER BY
-                        COALESCE(
-                            (
-                                SELECT
-                                    m.created_at
-                                FROM cherychat_messages m
-                                WHERE
-                                    m.conversation_id = c.id
-                                ORDER BY
-                                    m.created_at DESC
-                                LIMIT 1
-                            ),
-                            c.created_at
-                        ) DESC
-                    `,
-                    [userId]
-                );
-
-            res.json({
-                success: true,
-
-                conversations:
-                    result.rows.map(
-                        row => ({
-
-                            id: row.id,
-
-                            otherUser: {
-
-                                id:
-                                    row.other_id,
-
-                                fullName:
-                                    row.other_name,
-
-                                full_name:
-                                    row.other_name,
-
-                                email:
-                                    row.other_email,
-
-                                phone:
-                                    row.other_phone,
-
-                                profilePicture:
-                                    row.other_picture ||
-                                    createAvatar(
-                                        row.other_name
-                                    ),
-
-                                profile_picture:
-                                    row.other_picture ||
-                                    createAvatar(
-                                        row.other_name
-                                    ),
-
-                                about:
-                                    row.other_about,
-
-                                isOnline:
-                                    !!row.other_online,
-
-                                is_online:
-                                    !!row.other_online,
-
-                                lastSeen:
-                                    row.other_last_seen,
-
-                                last_seen:
-                                    row.other_last_seen
-                            },
-
-                            lastMessage:
-                                row.last_message ||
-                                "",
-
-                            lastMessageTime:
-                                row.last_message_time
-                        })
-                    )
-            });
-
-        } catch (error) {
-
-            console.error(
-                "GET CONVERSATIONS ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (
+            !(await userExists(userId)) ||
+            !(await userExists(otherUserId))
+        ) {
+            return res.status(404).json({
                 success: false,
-                message:
-                    "Unable to load conversations."
+                message: "User not found."
             });
         }
+
+        const userOne = Math.min(userId, otherUserId);
+        const userTwo = Math.max(userId, otherUserId);
+
+        const result = await pool.query(
+            `
+            INSERT INTO cherychat_conversations
+                (user_one, user_two)
+            VALUES
+                ($1, $2)
+            ON CONFLICT (user_one, user_two)
+            DO UPDATE SET user_one = EXCLUDED.user_one
+            RETURNING *
+            `,
+            [userOne, userTwo]
+        );
+
+        res.status(201).json({
+            success: true,
+            conversation: result.rows[0]
+        });
+    } catch (error) {
+        console.error("Create conversation error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to create conversation."
+        });
     }
-);
+});
 
-/* =========================================================
-   SEND PRIVATE MESSAGE
-========================================================= */
+app.get("/api/conversations", async (req, res) => {
+    try {
+        const userId = toId(req.query.userId);
 
-app.post(
-    "/api/messages",
-    async (req, res) => {
-
-        try {
-
-            const senderId =
-                toId(
-                    req.body.senderId
-                );
-
-            const receiverId =
-                toId(
-                    req.body.receiverId
-                );
-
-            const messageText =
-                cleanText(
-                    req.body.messageText,
-                    5000
-                );
-
-            if (
-                !senderId ||
-                !receiverId ||
-                !messageText
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Message details are required."
-                });
-            }
-
-            const one =
-                Math.min(
-                    senderId,
-                    receiverId
-                );
-
-            const two =
-                Math.max(
-                    senderId,
-                    receiverId
-                );
-
-            const conversation =
-                await pool.query(
-                    `
-                    INSERT INTO
-                        cherychat_conversations
-                    (
-                        user_one,
-                        user_two
-                    )
-                    VALUES ($1, $2)
-
-                    ON CONFLICT
-                    (user_one, user_two)
-
-                    DO UPDATE SET
-                        user_one =
-                            EXCLUDED.user_one
-
-                    RETURNING id
-                    `,
-                    [one, two]
-                );
-
-            const conversationId =
-                conversation.rows[0].id;
-
-            const result =
-                await pool.query(
-                    `
-                    INSERT INTO
-                        cherychat_messages
-                    (
-                        conversation_id,
-                        sender_id,
-                        message_text
-                    )
-                    VALUES ($1, $2, $3)
-
-                    RETURNING
-                        id,
-                        conversation_id,
-                        sender_id,
-                        message_text,
-                        is_read,
-                        created_at
-                    `,
-                    [
-                        conversationId,
-                        senderId,
-                        messageText
-                    ]
-                );
-
-            res.status(201).json({
-                success: true,
-                message:
-                    result.rows[0]
-            });
-
-        } catch (error) {
-
-            console.error(
-                "SEND MESSAGE ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!userId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to send message."
+                message: "Valid user ID is required."
             });
         }
+
+        if (!(await userExists(userId))) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            SELECT
+                c.id,
+                c.created_at,
+                CASE
+                    WHEN c.user_one = $1 THEN c.user_two
+                    ELSE c.user_one
+                END AS other_user_id,
+
+                u.full_name AS other_full_name,
+                u.email AS other_email,
+                u.phone AS other_phone,
+                u.profile_picture AS other_profile_picture,
+                u.about AS other_about,
+                u.is_online AS other_is_online,
+                u.last_seen AS other_last_seen,
+
+                m.message_text AS last_message,
+                m.created_at AS last_message_time,
+                m.sender_id AS last_message_sender_id,
+                m.is_read AS last_message_read
+
+            FROM cherychat_conversations c
+
+            JOIN cherychat_users u
+                ON u.id = CASE
+                    WHEN c.user_one = $1 THEN c.user_two
+                    ELSE c.user_one
+                END
+
+            LEFT JOIN LATERAL (
+                SELECT
+                    message_text,
+                    created_at,
+                    sender_id,
+                    is_read
+                FROM cherychat_messages
+                WHERE conversation_id = c.id
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            ) m ON TRUE
+
+            WHERE c.user_one = $1
+               OR c.user_two = $1
+
+            ORDER BY
+                COALESCE(m.created_at, c.created_at) DESC
+            `,
+            [userId]
+        );
+
+        const conversations = result.rows.map((row) => ({
+            id: row.id,
+            conversationId: row.id,
+            otherUserId: row.other_user_id,
+            otherUser: {
+                id: row.other_user_id,
+                userId: row.other_user_id,
+                fullName: row.other_full_name,
+                email: row.other_email,
+                phone: row.other_phone,
+                profilePicture:
+                    row.other_profile_picture ||
+                    createAvatar(row.other_full_name),
+                about: row.other_about || "using VibeChat",
+                isOnline: Boolean(row.other_is_online),
+                lastSeen: row.other_last_seen
+            },
+            lastMessage: row.last_message || "",
+            lastMessageTime: row.last_message_time || null,
+            lastMessageSenderId: row.last_message_sender_id || null,
+            lastMessageRead: Boolean(row.last_message_read)
+        }));
+
+        res.json({
+            success: true,
+            conversations
+        });
+    } catch (error) {
+        console.error("Conversations error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load conversations."
+        });
     }
-);
+});
 
 /* =========================================================
-   GET PRIVATE MESSAGES
+   PRIVATE MESSAGES
 ========================================================= */
 
-app.get(
-    "/api/messages",
-    async (req, res) => {
+app.post("/api/messages", async (req, res) => {
+    try {
+        const senderId = toId(req.body.senderId);
+        const receiverId = toId(req.body.receiverId);
+        const messageText = cleanText(req.body.messageText, 10000);
 
-        try {
+        if (
+            !senderId ||
+            !receiverId ||
+            senderId === receiverId ||
+            !messageText
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Valid sender, receiver and message are required."
+            });
+        }
 
-            const userId =
-                toId(
-                    req.query.userId
-                );
+        if (
+            !(await userExists(senderId)) ||
+            !(await userExists(receiverId))
+        ) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found."
+            });
+        }
 
-            const otherUserId =
-                toId(
-                    req.query.otherUserId
-                );
+        const userOne = Math.min(senderId, receiverId);
+        const userTwo = Math.max(senderId, receiverId);
 
-            if (!userId || !otherUserId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Invalid users."
-                });
-            }
+        const conversation = await pool.query(
+            `
+            INSERT INTO cherychat_conversations
+                (user_one, user_two)
+            VALUES
+                ($1, $2)
+            ON CONFLICT (user_one, user_two)
+            DO UPDATE SET user_one = EXCLUDED.user_one
+            RETURNING id
+            `,
+            [userOne, userTwo]
+        );
 
-            const one =
-                Math.min(
-                    userId,
-                    otherUserId
-                );
+        const conversationId = conversation.rows[0].id;
 
-            const two =
-                Math.max(
-                    userId,
-                    otherUserId
-                );
-
-            const conversation =
-                await pool.query(
-                    `
-                    SELECT id
-                    FROM cherychat_conversations
-                    WHERE
-                        user_one = $1
-                        AND user_two = $2
-                    `,
-                    [one, two]
-                );
-
-            if (!conversation.rows.length) {
-                return res.json({
-                    success: true,
-                    messages: []
-                });
-            }
-
-            const conversationId =
-                conversation.rows[0].id;
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT
-                        m.id,
-                        m.conversation_id,
-                        m.sender_id,
-                        m.message_text,
-                        m.is_read,
-                        m.created_at,
-
-                        u.full_name AS sender_name,
-                        u.profile_picture AS sender_picture
-
-                    FROM cherychat_messages m
-
-                    JOIN cherychat_users u
-                    ON u.id = m.sender_id
-
-                    WHERE
-                        m.conversation_id = $1
-
-                    ORDER BY
-                        m.created_at ASC
-                    `,
-                    [conversationId]
-                );
-
-            res.json({
-                success: true,
-
+        const result = await pool.query(
+            `
+            INSERT INTO cherychat_messages
+                (
+                    conversation_id,
+                    sender_id,
+                    receiver_id,
+                    message_text
+                )
+            VALUES
+                ($1, $2, $3, $4)
+            RETURNING *
+            `,
+            [
                 conversationId,
+                senderId,
+                receiverId,
+                messageText
+            ]
+        );
 
-                messages:
-                    result.rows.map(
-                        row => ({
+        res.status(201).json({
+            success: true,
+            message: formatPrivateMessage(result.rows[0])
+        });
+    } catch (error) {
+        console.error("Send message error:", error);
 
-                            id: row.id,
+        res.status(500).json({
+            success: false,
+            message: "Unable to send message."
+        });
+    }
+});
 
-                            conversationId:
-                                row.conversation_id,
+app.get("/api/messages", async (req, res) => {
+    try {
+        const userId = toId(req.query.userId);
+        const otherUserId = toId(req.query.otherUserId);
 
-                            senderId:
-                                row.sender_id,
-
-                            senderName:
-                                row.sender_name,
-
-                            senderPicture:
-                                row.sender_picture ||
-                                createAvatar(
-                                    row.sender_name
-                                ),
-
-                            messageText:
-                                row.message_text,
-
-                            isRead:
-                                row.is_read,
-
-                            createdAt:
-                                row.created_at
-                        })
-                    )
-            });
-
-        } catch (error) {
-
-            console.error(
-                "GET MESSAGES ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (
+            !userId ||
+            !otherUserId ||
+            userId === otherUserId
+        ) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to load messages."
+                message: "Valid users are required."
             });
         }
-    }
-);
 
-/* =========================================================
-   MARK MESSAGES READ
-========================================================= */
+        const userOne = Math.min(userId, otherUserId);
+        const userTwo = Math.max(userId, otherUserId);
 
-app.put(
-    "/api/messages/read",
-    async (req, res) => {
+        const conversation = await pool.query(
+            `
+            SELECT id
+            FROM cherychat_conversations
+            WHERE user_one = $1
+              AND user_two = $2
+            LIMIT 1
+            `,
+            [userOne, userTwo]
+        );
 
-        try {
-
-            const userId =
-                toId(
-                    req.body.userId
-                );
-
-            const otherUserId =
-                toId(
-                    req.body.otherUserId
-                );
-
-            if (!userId || !otherUserId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Invalid users."
-                });
-            }
-
-            const one =
-                Math.min(
-                    userId,
-                    otherUserId
-                );
-
-            const two =
-                Math.max(
-                    userId,
-                    otherUserId
-                );
-
-            const conversation =
-                await pool.query(
-                    `
-                    SELECT id
-                    FROM cherychat_conversations
-                    WHERE
-                        user_one = $1
-                        AND user_two = $2
-                    `,
-                    [one, two]
-                );
-
-            if (!conversation.rows.length) {
-                return res.json({
-                    success: true
-                });
-            }
-
-            await pool.query(
-                `
-                UPDATE cherychat_messages
-
-                SET is_read = TRUE
-
-                WHERE
-                    conversation_id = $1
-                    AND sender_id = $2
-                `,
-                [
-                    conversation.rows[0].id,
-                    otherUserId
-                ]
-            );
-
-            res.json({
-                success: true
-            });
-
-        } catch (error) {
-
-            console.error(
-                "READ MESSAGE ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to mark messages read."
+        if (conversation.rows.length === 0) {
+            return res.json({
+                success: true,
+                messages: []
             });
         }
+
+        const conversationId = conversation.rows[0].id;
+
+        const result = await pool.query(
+            `
+            SELECT *
+            FROM cherychat_messages
+            WHERE conversation_id = $1
+            ORDER BY created_at ASC, id ASC
+            `,
+            [conversationId]
+        );
+
+        res.json({
+            success: true,
+            messages: result.rows.map(formatPrivateMessage)
+        });
+    } catch (error) {
+        console.error("Get messages error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load messages."
+        });
     }
-);
+});
+
+app.put("/api/messages/read", async (req, res) => {
+    try {
+        const userId = toId(req.body.userId);
+        const otherUserId = toId(req.body.otherUserId);
+
+        if (!userId || !otherUserId) {
+            return res.status(400).json({
+                success: false,
+                message: "Valid users are required."
+            });
+        }
+
+        const userOne = Math.min(userId, otherUserId);
+        const userTwo = Math.max(userId, otherUserId);
+
+        const conversation = await pool.query(
+            `
+            SELECT id
+            FROM cherychat_conversations
+            WHERE user_one = $1
+              AND user_two = $2
+            LIMIT 1
+            `,
+            [userOne, userTwo]
+        );
+
+        if (conversation.rows.length === 0) {
+            return res.json({
+                success: true,
+                updated: 0
+            });
+        }
+
+        const result = await pool.query(
+            `
+            UPDATE cherychat_messages
+            SET is_read = TRUE
+            WHERE conversation_id = $1
+              AND receiver_id = $2
+              AND is_read = FALSE
+            `,
+            [conversation.rows[0].id, userId]
+        );
+
+        res.json({
+            success: true,
+            updated: result.rowCount
+        });
+    } catch (error) {
+        console.error("Read messages error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to mark messages as read."
+        });
+    }
+});
 
 /* =========================================================
    STORIES
 ========================================================= */
 
-/*
-    CREATE STORY
+app.post("/api/stories", async (req, res) => {
+    try {
+        const userId = toId(req.body.userId);
+        const mediaType = cleanText(req.body.mediaType, 20).toLowerCase();
+        const mediaData = cleanText(
+            req.body.mediaData || req.body.media,
+            10000000
+        );
+        const caption = cleanText(req.body.caption, 1000);
 
-    Body:
-
-    {
-        userId: 1,
-        mediaType: "image",
-        mediaData: "data:image/jpeg;base64,...",
-        caption: "Hello VibeChat"
-    }
-*/
-
-app.post(
-    "/api/stories",
-    async (req, res) => {
-
-        try {
-
-            const userId =
-                toId(
-                    req.body.userId
-                );
-
-            const mediaType =
-                req.body.mediaType === "video"
-                    ? "video"
-                    : "image";
-
-            const mediaData =
-                String(
-                    req.body.mediaData || ""
-                ).trim();
-
-            const caption =
-                cleanText(
-                    req.body.caption,
-                    500
-                );
-
-            if (!userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid user ID is required."
-                });
-            }
-
-            if (!mediaData) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Story media is required."
-                });
-            }
-
-            if (!(await userExists(userId))) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "User not found."
-                });
-            }
-
-            /* ---------------------------------------------
-               VALIDATE MEDIA
-            --------------------------------------------- */
-
-            const validImage =
-                /^data:image\/(jpeg|jpg|png|webp);base64,[A-Za-z0-9+/=\s]+$/i
-                    .test(mediaData);
-
-            const validVideo =
-                /^data:video\/(mp4|webm|ogg);base64,[A-Za-z0-9+/=\s]+$/i
-                    .test(mediaData);
-
-            if (
-                mediaType === "image" &&
-                !validImage
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Please upload a valid JPG, PNG or WEBP image."
-                });
-            }
-
-            if (
-                mediaType === "video" &&
-                !validVideo
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Please upload a valid MP4, WEBM or OGG video."
-                });
-            }
-
-            /* ---------------------------------------------
-               SIZE LIMIT
-            --------------------------------------------- */
-
-            const base64Part =
-                mediaData.split(",")[1] || "";
-
-            const estimatedBytes =
-                Math.ceil(
-                    (base64Part.length * 3) / 4
-                );
-
-            const maxBytes =
-                mediaType === "video"
-                    ? 8 * 1024 * 1024
-                    : 4 * 1024 * 1024;
-
-            if (
-                estimatedBytes > maxBytes
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        mediaType === "video"
-                            ? "Story video must be 8MB or smaller."
-                            : "Story image must be 4MB or smaller."
-                });
-            }
-
-            /* ---------------------------------------------
-               REMOVE EXPIRED STORIES
-            --------------------------------------------- */
-
-            await pool.query(`
-                DELETE FROM cherychat_stories
-                WHERE expires_at <= CURRENT_TIMESTAMP
-            `);
-
-            /* ---------------------------------------------
-               CREATE STORY
-            --------------------------------------------- */
-
-            const result =
-                await pool.query(
-                    `
-                    INSERT INTO
-                        cherychat_stories
-                    (
-                        user_id,
-                        media_type,
-                        media_data,
-                        caption,
-                        expires_at
-                    )
-                    VALUES
-                    (
-                        $1,
-                        $2,
-                        $3,
-                        $4,
-                        CURRENT_TIMESTAMP +
-                        INTERVAL '24 hours'
-                    )
-
-                    RETURNING
-                        id,
-                        user_id,
-                        media_type,
-                        media_data,
-                        caption,
-                        created_at,
-                        expires_at
-                    `,
-                    [
-                        userId,
-                        mediaType,
-                        mediaData,
-                        caption
-                    ]
-                );
-
-            const story =
-                result.rows[0];
-
-            res.status(201).json({
-                success: true,
-                message:
-                    "Story posted successfully.",
-
-                story: {
-                    id: story.id,
-
-                    userId:
-                        story.user_id,
-
-                    mediaType:
-                        story.media_type,
-
-                    mediaData:
-                        story.media_data,
-
-                    caption:
-                        story.caption || "",
-
-                    createdAt:
-                        story.created_at,
-
-                    expiresAt:
-                        story.expires_at,
-
-                    viewCount: 0,
-
-                    viewedByMe: false,
-
-                    isOwn: true
-                }
-            });
-
-        } catch (error) {
-
-            console.error(
-                "CREATE STORY ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!userId || !(await userExists(userId))) {
+            return res.status(404).json({
                 success: false,
-                message:
-                    "Unable to post story."
+                message: "User not found."
             });
         }
-    }
-);
 
-/* =========================================================
-   GET ACTIVE STORIES
-========================================================= */
-
-app.get(
-    "/api/stories",
-    async (req, res) => {
-
-        try {
-
-            const userId =
-                toId(
-                    req.query.userId
-                );
-
-            if (!userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid user ID is required."
-                });
-            }
-
-            /* ---------------------------------------------
-               DELETE EXPIRED STORIES
-            --------------------------------------------- */
-
-            await pool.query(`
-                DELETE FROM cherychat_stories
-                WHERE expires_at <= CURRENT_TIMESTAMP
-            `);
-
-            /* ---------------------------------------------
-               GET STORIES
-
-               Own stories + other users' stories.
-            --------------------------------------------- */
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT
-                        s.id,
-                        s.user_id,
-                        s.media_type,
-                        s.media_data,
-                        s.caption,
-                        s.created_at,
-                        s.expires_at,
-
-                        u.full_name,
-                        u.profile_picture,
-                        u.is_online,
-                        u.last_seen,
-
-                        (
-                            SELECT COUNT(*)
-                            FROM cherychat_story_views sv
-                            WHERE
-                                sv.story_id = s.id
-                        ) AS view_count,
-
-                        EXISTS (
-                            SELECT 1
-                            FROM cherychat_story_views sv2
-                            WHERE
-                                sv2.story_id = s.id
-                                AND sv2.viewer_id = $1
-                        ) AS viewed_by_me
-
-                    FROM cherychat_stories s
-
-                    JOIN cherychat_users u
-                    ON u.id = s.user_id
-
-                    WHERE
-                        s.expires_at >
-                        CURRENT_TIMESTAMP
-
-                    ORDER BY
-
-                        CASE
-                            WHEN s.user_id = $1
-                            THEN 0
-                            ELSE 1
-                        END,
-
-                        s.created_at ASC
-                    `,
-                    [userId]
-                );
-
-            const stories =
-                result.rows.map(
-                    row =>
-                        formatStory(
-                            row,
-                            userId
-                        )
-                );
-
-            /* ---------------------------------------------
-               GROUP STORIES BY USER
-            --------------------------------------------- */
-
-            const users = [];
-            const userMap = new Map();
-
-            for (const story of stories) {
-
-                if (!userMap.has(story.userId)) {
-
-                    const person = {
-
-                        userId:
-                            story.userId,
-
-                        fullName:
-                            story.fullName,
-
-                        profilePicture:
-                            story.profilePicture,
-
-                        isOwn:
-                            story.isOwn,
-
-                        stories: []
-                    };
-
-                    userMap.set(
-                        story.userId,
-                        person
-                    );
-
-                    users.push(person);
-                }
-
-                userMap
-                    .get(story.userId)
-                    .stories
-                    .push(story);
-            }
-
-            res.json({
-                success: true,
-
-                stories,
-
-                users
-            });
-
-        } catch (error) {
-
-            console.error(
-                "GET STORIES ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!["image", "video"].includes(mediaType)) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to load stories."
+                message: "Story media type must be image or video."
             });
         }
-    }
-);
 
-/* =========================================================
-   GET SINGLE STORY
-========================================================= */
-
-app.get(
-    "/api/stories/:id",
-    async (req, res) => {
-
-        try {
-
-            const storyId =
-                toId(
-                    req.params.id
-                );
-
-            const viewerId =
-                toId(
-                    req.query.userId
-                );
-
-            if (!storyId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Invalid story ID."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT
-                        s.id,
-                        s.user_id,
-                        s.media_type,
-                        s.media_data,
-                        s.caption,
-                        s.created_at,
-                        s.expires_at,
-
-                        u.full_name,
-                        u.profile_picture,
-
-                        (
-                            SELECT COUNT(*)
-                            FROM cherychat_story_views sv
-                            WHERE
-                                sv.story_id = s.id
-                        ) AS view_count,
-
-                        EXISTS (
-                            SELECT 1
-                            FROM cherychat_story_views sv2
-                            WHERE
-                                sv2.story_id = s.id
-                                AND sv2.viewer_id = $2
-                        ) AS viewed_by_me
-
-                    FROM cherychat_stories s
-
-                    JOIN cherychat_users u
-                    ON u.id = s.user_id
-
-                    WHERE
-                        s.id = $1
-
-                        AND
-                        s.expires_at >
-                        CURRENT_TIMESTAMP
-                    `,
-                    [
-                        storyId,
-                        viewerId
-                    ]
-                );
-
-            if (!result.rows.length) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Story not found or has expired."
-                });
-            }
-
-            res.json({
-                success: true,
-
-                story:
-                    formatStory(
-                        result.rows[0],
-                        viewerId
-                    )
-            });
-
-        } catch (error) {
-
-            console.error(
-                "GET STORY ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!mediaData) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to load story."
+                message: "Story media is required."
             });
         }
-    }
-);
 
-/* =========================================================
-   VIEW STORY
-========================================================= */
-
-app.post(
-    "/api/stories/:id/view",
-    async (req, res) => {
-
-        try {
-
-            const storyId =
-                toId(
-                    req.params.id
-                );
-
-            const viewerId =
-                toId(
-                    req.body.userId
-                );
-
-            if (!storyId || !viewerId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid story and user are required."
-                });
-            }
-
-            if (!(await userExists(viewerId))) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Viewer not found."
-                });
-            }
-
-            const storyResult =
-                await pool.query(
-                    `
-                    SELECT
-                        id,
-                        user_id,
-                        expires_at
-                    FROM cherychat_stories
-                    WHERE
-                        id = $1
-                        AND expires_at >
-                            CURRENT_TIMESTAMP
-                    `,
-                    [storyId]
-                );
-
-            if (!storyResult.rows.length) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Story not found or has expired."
-                });
-            }
-
-            const story =
-                storyResult.rows[0];
-
-            /*
-                Don't count owner as viewer.
-            */
-
-            if (
-                Number(story.user_id) ===
-                Number(viewerId)
-            ) {
-                return res.json({
-                    success: true,
-                    message:
-                        "Story owner."
-                });
-            }
-
-            /*
-                One viewer = one view.
-
-                If they open the same story again,
-                the existing view is simply updated.
-            */
-
-            await pool.query(
-                `
-                INSERT INTO
-                    cherychat_story_views
+        const result = await pool.query(
+            `
+            INSERT INTO cherychat_stories
                 (
-                    story_id,
-                    viewer_id,
-                    viewed_at
+                    user_id,
+                    media_type,
+                    media_data,
+                    caption
                 )
-                VALUES
-                ($1, $2, CURRENT_TIMESTAMP)
+            VALUES
+                ($1, $2, $3, $4)
+            RETURNING *
+            `,
+            [
+                userId,
+                mediaType,
+                mediaData,
+                caption
+            ]
+        );
 
-                ON CONFLICT
-                (story_id, viewer_id)
+        const storyResult = await pool.query(
+            `
+            SELECT
+                s.*,
+                u.full_name,
+                u.profile_picture
+            FROM cherychat_stories s
+            JOIN cherychat_users u
+                ON u.id = s.user_id
+            WHERE s.id = $1
+            `,
+            [result.rows[0].id]
+        );
 
-                DO UPDATE SET
-                    viewed_at =
-                        CURRENT_TIMESTAMP
-                `,
-                [
-                    storyId,
-                    viewerId
-                ]
-            );
+        res.status(201).json({
+            success: true,
+            story: formatStory(storyResult.rows[0])
+        });
+    } catch (error) {
+        console.error("Create story error:", error);
 
-            res.json({
-                success: true,
-                message:
-                    "Story viewed."
-            });
+        res.status(500).json({
+            success: false,
+            message: "Unable to create story."
+        });
+    }
+});
 
-        } catch (error) {
+app.get("/api/stories", async (req, res) => {
+    try {
+        const userId = toId(req.query.userId);
 
-            console.error(
-                "VIEW STORY ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!userId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to record story view."
+                message: "Valid user ID is required."
             });
         }
-    }
-);
 
-/* =========================================================
-   GET STORY VIEWERS
-========================================================= */
+        await pool.query(`
+            DELETE FROM cherychat_stories
+            WHERE expires_at <= CURRENT_TIMESTAMP
+        `);
 
-app.get(
-    "/api/stories/:id/viewers",
-    async (req, res) => {
+        const result = await pool.query(
+            `
+            SELECT
+                s.*,
+                u.full_name,
+                u.profile_picture
+            FROM cherychat_stories s
+            JOIN cherychat_users u
+                ON u.id = s.user_id
+            WHERE s.expires_at > CURRENT_TIMESTAMP
+            ORDER BY s.created_at ASC
+            `
+        );
 
-        try {
+        const grouped = new Map();
 
-            const storyId =
-                toId(
-                    req.params.id
-                );
-
-            const ownerId =
-                toId(
-                    req.query.userId
-                );
-
-            if (!storyId || !ownerId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Invalid request."
+        for (const row of result.rows) {
+            if (!grouped.has(row.user_id)) {
+                grouped.set(row.user_id, {
+                    userId: row.user_id,
+                    fullName: row.full_name,
+                    profilePicture:
+                        row.profile_picture ||
+                        createAvatar(row.full_name),
+                    isOwn: row.user_id === userId,
+                    stories: []
                 });
             }
 
-            const storyResult =
-                await pool.query(
-                    `
-                    SELECT id
-                    FROM cherychat_stories
-                    WHERE
-                        id = $1
-                        AND user_id = $2
-                    `,
-                    [
-                        storyId,
-                        ownerId
-                    ]
-                );
-
-            if (!storyResult.rows.length) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only the story owner can view its viewers."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT
-                        sv.id,
-                        sv.viewer_id,
-                        sv.viewed_at,
-
-                        u.full_name,
-                        u.profile_picture,
-                        u.is_online,
-                        u.last_seen
-
-                    FROM cherychat_story_views sv
-
-                    JOIN cherychat_users u
-                    ON u.id = sv.viewer_id
-
-                    WHERE
-                        sv.story_id = $1
-
-                    ORDER BY
-                        sv.viewed_at DESC
-                    `,
-                    [storyId]
-                );
-
-            res.json({
-                success: true,
-
-                viewers:
-                    result.rows.map(
-                        row => ({
-
-                            id:
-                                row.id,
-
-                            userId:
-                                row.viewer_id,
-
-                            fullName:
-                                row.full_name,
-
-                            profilePicture:
-                                row.profile_picture ||
-                                createAvatar(
-                                    row.full_name
-                                ),
-
-                            viewedAt:
-                                row.viewed_at,
-
-                            isOnline:
-                                !!row.is_online,
-
-                            lastSeen:
-                                row.last_seen
-                        })
-                    )
-            });
-
-        } catch (error) {
-
-            console.error(
-                "STORY VIEWERS ERROR:",
-                error
+            grouped.get(row.user_id).stories.push(
+                formatStory(row)
             );
+        }
 
-            res.status(500).json({
+        res.json({
+            success: true,
+            groups: Array.from(grouped.values())
+        });
+    } catch (error) {
+        console.error("Get stories error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load stories."
+        });
+    }
+});
+
+app.get("/api/stories/:id", async (req, res) => {
+    try {
+        const storyId = toId(req.params.id);
+        const viewerId = toId(req.query.viewerId);
+
+        if (!storyId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to load story viewers."
+                message: "Invalid story ID."
             });
         }
-    }
-);
 
-/* =========================================================
-   DELETE STORY
-========================================================= */
+        const result = await pool.query(
+            `
+            SELECT
+                s.*,
+                u.full_name,
+                u.profile_picture
+            FROM cherychat_stories s
+            JOIN cherychat_users u
+                ON u.id = s.user_id
+            WHERE s.id = $1
+              AND s.expires_at > CURRENT_TIMESTAMP
+            `,
+            [storyId]
+        );
 
-app.delete(
-    "/api/stories/:id",
-    async (req, res) => {
-
-        try {
-
-            const storyId =
-                toId(
-                    req.params.id
-                );
-
-            const userId =
-                toId(
-                    req.body.userId
-                );
-
-            if (!storyId || !userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Invalid request."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    DELETE FROM cherychat_stories
-
-                    WHERE
-                        id = $1
-                        AND user_id = $2
-
-                    RETURNING id
-                    `,
-                    [
-                        storyId,
-                        userId
-                    ]
-                );
-
-            if (!result.rows.length) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Story not found or you are not the owner."
-                });
-            }
-
-            res.json({
-                success: true,
-                message:
-                    "Story deleted successfully."
-            });
-
-        } catch (error) {
-
-            console.error(
-                "DELETE STORY ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (result.rows.length === 0) {
+            return res.status(404).json({
                 success: false,
-                message:
-                    "Unable to delete story."
+                message: "Story not found or expired."
             });
         }
-    }
-);
 
-/* =========================================================
-   CLEAN EXPIRED STORIES
-========================================================= */
+        let viewed = false;
 
-app.delete(
-    "/api/stories/expired/cleanup",
-    async (req, res) => {
-
-        try {
-
-            const result =
-                await pool.query(
-                    `
-                    DELETE FROM cherychat_stories
-
-                    WHERE
-                        expires_at <=
-                        CURRENT_TIMESTAMP
-
-                    RETURNING id
-                    `
-                );
-
-            res.json({
-                success: true,
-
-                deleted:
-                    result.rows.length
-            });
-
-        } catch (error) {
-
-            console.error(
-                "STORY CLEANUP ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to clean stories."
-            });
-        }
-    }
-);
-
-/* =========================================================
-   CREATE GROUP
-========================================================= */
-
-app.post(
-    "/api/groups",
-    async (req, res) => {
-
-        try {
-
-            const ownerId =
-                toId(
-                    req.body.ownerId
-                );
-
-            const name =
-                cleanGroupName(
-                    req.body.name
-                );
-
-            const description =
-                cleanDescription(
-                    req.body.description
-                );
-
-            const groupType =
-                req.body.groupType ===
-                "private"
-                    ? "private"
-                    : "public";
-
-            if (!ownerId || !name) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Group name is required."
-                });
-            }
-
-            if (!(await userExists(ownerId))) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Owner not found."
-                });
-            }
-
-            let inviteCode =
-                generateInviteCode();
-
-            while (
-                (
-                    await pool.query(
-                        `
-                        SELECT id
-                        FROM cherychat_groups
-                        WHERE invite_code = $1
-                        `,
-                        [inviteCode]
-                    )
-                ).rows.length
-            ) {
-                inviteCode =
-                    generateInviteCode();
-            }
-
-            const groupResult =
-                await pool.query(
-                    `
-                    INSERT INTO
-                        cherychat_groups
-                    (
-                        name,
-                        description,
-                        group_type,
-                        visibility,
-                        invite_code,
-                        owner_id
-                    )
-                    VALUES
-                    ($1, $2, $3, $4, $5, $6)
-
-                    RETURNING *
-                    `,
-                    [
-                        name,
-                        description,
-                        groupType,
-                        groupType === "private"
-                            ? "private"
-                            : "public",
-                        inviteCode,
-                        ownerId
-                    ]
-                );
-
-            const group =
-                groupResult.rows[0];
-
-            await pool.query(
+        if (viewerId) {
+            const viewResult = await pool.query(
                 `
-                INSERT INTO
-                    cherychat_group_members
+                SELECT id
+                FROM cherychat_story_views
+                WHERE story_id = $1
+                  AND viewer_id = $2
+                LIMIT 1
+                `,
+                [storyId, viewerId]
+            );
+
+            viewed = viewResult.rows.length > 0;
+        }
+
+        res.json({
+            success: true,
+            story: formatStory(result.rows[0]),
+            viewed
+        });
+    } catch (error) {
+        console.error("Get story error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load story."
+        });
+    }
+});
+
+app.post("/api/stories/:id/view", async (req, res) => {
+    try {
+        const storyId = toId(req.params.id);
+        const viewerId = toId(req.body.viewerId);
+
+        if (!storyId || !viewerId) {
+            return res.status(400).json({
+                success: false,
+                message: "Story ID and viewer ID are required."
+            });
+        }
+
+        if (!(await userExists(viewerId))) {
+            return res.status(404).json({
+                success: false,
+                message: "Viewer not found."
+            });
+        }
+
+        const story = await pool.query(
+            `
+            SELECT id
+            FROM cherychat_stories
+            WHERE id = $1
+              AND expires_at > CURRENT_TIMESTAMP
+            `,
+            [storyId]
+        );
+
+        if (story.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Story not found or expired."
+            });
+        }
+
+        await pool.query(
+            `
+            INSERT INTO cherychat_story_views
+                (story_id, viewer_id)
+            VALUES
+                ($1, $2)
+            ON CONFLICT (story_id, viewer_id)
+            DO NOTHING
+            `,
+            [storyId, viewerId]
+        );
+
+        res.json({
+            success: true,
+            message: "Story viewed."
+        });
+    } catch (error) {
+        console.error("Story view error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to record story view."
+        });
+    }
+});
+
+app.get("/api/stories/:id/viewers", async (req, res) => {
+    try {
+        const storyId = toId(req.params.id);
+
+        if (!storyId) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid story ID."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            SELECT
+                u.id,
+                u.full_name,
+                u.profile_picture,
+                v.viewed_at
+            FROM cherychat_story_views v
+            JOIN cherychat_users u
+                ON u.id = v.viewer_id
+            WHERE v.story_id = $1
+            ORDER BY v.viewed_at DESC
+            `,
+            [storyId]
+        );
+
+        res.json({
+            success: true,
+            viewers: result.rows.map((row) => ({
+                id: row.id,
+                userId: row.id,
+                fullName: row.full_name,
+                profilePicture:
+                    row.profile_picture ||
+                    createAvatar(row.full_name),
+                viewedAt: row.viewed_at
+            }))
+        });
+    } catch (error) {
+        console.error("Story viewers error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load story viewers."
+        });
+    }
+});
+
+app.delete("/api/stories/:id", async (req, res) => {
+    try {
+        const storyId = toId(req.params.id);
+        const userId = toId(
+            req.body.userId || req.query.userId
+        );
+
+        if (!storyId || !userId) {
+            return res.status(400).json({
+                success: false,
+                message: "Story ID and user ID are required."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            DELETE FROM cherychat_stories
+            WHERE id = $1
+              AND user_id = $2
+            RETURNING id
+            `,
+            [storyId, userId]
+        );
+
+        if (result.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Story not found or you are not the owner."
+            });
+        }
+
+        res.json({
+            success: true,
+            message: "Story deleted."
+        });
+    } catch (error) {
+        console.error("Delete story error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to delete story."
+        });
+    }
+});
+
+app.delete("/api/stories/expired/cleanup", async (req, res) => {
+    try {
+        const result = await pool.query(`
+            DELETE FROM cherychat_stories
+            WHERE expires_at <= CURRENT_TIMESTAMP
+        `);
+
+        res.json({
+            success: true,
+            deleted: result.rowCount
+        });
+    } catch (error) {
+        console.error("Story cleanup error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to clean expired stories."
+        });
+    }
+});
+
+/* =========================================================
+   GROUPS
+========================================================= */
+
+app.post("/api/groups", async (req, res) => {
+    const client = await pool.connect();
+
+    try {
+        const ownerId = toId(
+            req.body.ownerId || req.body.userId
+        );
+
+        const name = cleanGroupName(req.body.name);
+        const description = cleanDescription(req.body.description);
+
+        const groupType = cleanText(
+            req.body.groupType || req.body.type || "public",
+            20
+        ).toLowerCase();
+
+        const visibility = cleanText(
+            req.body.visibility || groupType,
+            20
+        ).toLowerCase();
+
+        if (!ownerId || !(await userExists(ownerId))) {
+            return res.status(404).json({
+                success: false,
+                message: "Owner not found."
+            });
+        }
+
+        if (!name) {
+            return res.status(400).json({
+                success: false,
+                message: "Group name is required."
+            });
+        }
+
+        const safeGroupType =
+            groupType === "private" ? "private" : "public";
+
+        const safeVisibility =
+            visibility === "private" ? "private" : "public";
+
+        await client.query("BEGIN");
+
+        let inviteCode = generateInviteCode();
+
+        for (let i = 0; i < 5; i++) {
+            const existing = await client.query(
+                `
+                SELECT id
+                FROM cherychat_groups
+                WHERE invite_code = $1
+                `,
+                [inviteCode]
+            );
+
+            if (existing.rows.length === 0) break;
+
+            inviteCode = generateInviteCode();
+        }
+
+        const groupResult = await client.query(
+            `
+            INSERT INTO cherychat_groups
+                (
+                    name,
+                    description,
+                    group_type,
+                    visibility,
+                    invite_code,
+                    owner_id
+                )
+            VALUES
+                ($1, $2, $3, $4, $5, $6)
+            RETURNING *
+            `,
+            [
+                name,
+                description,
+                safeGroupType,
+                safeVisibility,
+                inviteCode,
+                ownerId
+            ]
+        );
+
+        const group = groupResult.rows[0];
+
+        await client.query(
+            `
+            INSERT INTO cherychat_group_members
                 (
                     group_id,
                     user_id,
                     role,
                     status
                 )
-                VALUES
+            VALUES
                 ($1, $2, 'owner', 'active')
-                `,
-                [
-                    group.id,
-                    ownerId
-                ]
-            );
+            `,
+            [group.id, ownerId]
+        );
 
-            res.status(201).json({
-                success: true,
-                message:
-                    "Group created successfully.",
-                group:
-                    formatGroup(group)
-            });
+        await client.query("COMMIT");
 
-        } catch (error) {
+        const finalGroup = await getGroup(group.id);
 
-            console.error(
-                "CREATE GROUP ERROR:",
-                error
-            );
+        res.status(201).json({
+            success: true,
+            message: "Group created successfully.",
+            group: formatGroup(finalGroup)
+        });
+    } catch (error) {
+        await client.query("ROLLBACK");
 
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to create group."
-            });
-        }
+        console.error("Create group error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to create group."
+        });
+    } finally {
+        client.release();
     }
-);
+});
 
-/* =========================================================
-   DISCOVER GROUPS
-========================================================= */
+app.get("/api/groups", async (req, res) => {
+    try {
+        const userId = toId(req.query.userId);
 
-app.get(
-    "/api/groups",
-    async (req, res) => {
+        const result = await pool.query(
+            `
+            SELECT
+                g.*,
+                u.full_name AS owner_name,
+                u.profile_picture AS owner_profile_picture,
 
-        try {
-
-            const userId =
-                toId(
-                    req.query.userId
-                );
-
-            const q =
-                cleanText(
-                    req.query.q,
-                    100
-                );
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT
-                        g.*,
-
-                        u.full_name AS owner_name,
-
-                        (
-                            SELECT COUNT(*)
-                            FROM cherychat_group_members gm
-                            WHERE
-                                gm.group_id = g.id
-                                AND gm.status = 'active'
-                        ) AS member_count
-
-                    FROM cherychat_groups g
-
-                    JOIN cherychat_users u
-                    ON u.id = g.owner_id
-
-                    WHERE
-                        g.visibility = 'public'
-
-                        AND
-                        (
-                            $1 = ''
-
-                            OR g.name ILIKE
-                                '%' || $1 || '%'
-
-                            OR g.description ILIKE
-                                '%' || $1 || '%'
-                        )
-
-                    ORDER BY
-                        g.created_at DESC
-
-                    LIMIT 100
-                    `,
-                    [q]
-                );
-
-            const groups = [];
-
-            for (const row of result.rows) {
-
-                let membership = null;
-
-                if (userId) {
-                    membership =
-                        await getMembership(
-                            row.id,
-                            userId
-                        );
-                }
-
-                groups.push({
-                    ...formatGroup(row),
-
-                    ownerName:
-                        row.owner_name,
-
-                    memberCount:
-                        Number(
-                            row.member_count || 0
-                        ),
-
-                    membership:
-                        membership
-                            ? {
-                                role:
-                                    membership.role,
-
-                                status:
-                                    membership.status
-                            }
-                            : null
-                });
-            }
-
-            res.json({
-                success: true,
-                groups
-            });
-
-        } catch (error) {
-
-            console.error(
-                "GET GROUPS ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to load groups."
-            });
-        }
-    }
-);
-
-/* =========================================================
-   MY GROUPS
-========================================================= */
-
-app.get(
-    "/api/groups/my",
-    async (req, res) => {
-
-        try {
-
-            const userId =
-                toId(
-                    req.query.userId
-                );
-
-            if (!userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Valid user ID is required."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT
-                        g.*,
-                        gm.role,
-
-                        (
-                            SELECT COUNT(*)
-                            FROM cherychat_group_members members
-                            WHERE
-                                members.group_id = g.id
-                                AND members.status = 'active'
-                        ) AS member_count
-
+                (
+                    SELECT COUNT(*)
                     FROM cherychat_group_members gm
+                    WHERE gm.group_id = g.id
+                      AND gm.status = 'active'
+                ) AS member_count,
 
-                    JOIN cherychat_groups g
-                    ON g.id = gm.group_id
+                gm.role AS membership_role,
+                gm.status AS membership_status
 
-                    WHERE
-                        gm.user_id = $1
-                        AND gm.status = 'active'
+            FROM cherychat_groups g
 
-                    ORDER BY
-                        g.created_at DESC
-                    `,
-                    [userId]
-                );
+            LEFT JOIN cherychat_users u
+                ON u.id = g.owner_id
 
-            res.json({
-                success: true,
+            LEFT JOIN cherychat_group_members gm
+                ON gm.group_id = g.id
+               AND gm.user_id = $1
 
-                groups:
-                    result.rows.map(
-                        row => ({
+            WHERE g.visibility = 'public'
 
-                            ...formatGroup(row),
+            ORDER BY g.created_at DESC
+            `,
+            [userId]
+        );
 
-                            role:
-                                row.role,
+        const groups = result.rows.map((row) =>
+            formatGroup({
+                ...row,
+                membership:
+                    row.membership_status
+                        ? {
+                              role: row.membership_role,
+                              status: row.membership_status
+                          }
+                        : null
+            })
+        );
 
-                            memberCount:
-                                Number(
-                                    row.member_count || 0
-                                )
-                        })
-                    )
-            });
+        res.json({
+            success: true,
+            groups
+        });
+    } catch (error) {
+        console.error("Get groups error:", error);
 
-        } catch (error) {
+        res.status(500).json({
+            success: false,
+            message: "Unable to load groups."
+        });
+    }
+});
 
-            console.error(
-                "MY GROUPS ERROR:",
-                error
-            );
+app.get("/api/groups/my", async (req, res) => {
+    try {
+        const userId = toId(req.query.userId);
 
-            res.status(500).json({
+        if (!userId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to load your groups."
+                message: "Valid user ID is required."
             });
         }
-    }
-);
 
-/* =========================================================
-   GROUP DETAILS
-========================================================= */
+        const result = await pool.query(
+            `
+            SELECT
+                g.*,
+                u.full_name AS owner_name,
+                u.profile_picture AS owner_profile_picture,
 
-app.get(
-    "/api/groups/:id",
-    async (req, res) => {
+                (
+                    SELECT COUNT(*)
+                    FROM cherychat_group_members gm2
+                    WHERE gm2.group_id = g.id
+                      AND gm2.status = 'active'
+                ) AS member_count,
 
-        try {
+                gm.role AS membership_role,
+                gm.status AS membership_status
 
-            const groupId =
-                toId(
-                    req.params.id
-                );
+            FROM cherychat_group_members gm
 
-            const userId =
-                toId(
-                    req.query.userId
-                );
+            JOIN cherychat_groups g
+                ON g.id = gm.group_id
 
-            if (!groupId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Invalid group."
-                });
-            }
+            LEFT JOIN cherychat_users u
+                ON u.id = g.owner_id
 
-            const group =
-                await getGroup(
-                    groupId
-                );
+            WHERE gm.user_id = $1
+              AND gm.status = 'active'
 
-            if (!group) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Group not found."
-                });
-            }
+            ORDER BY g.created_at DESC
+            `,
+            [userId]
+        );
 
-            const membership =
-                userId
-                    ? await getMembership(
-                        groupId,
-                        userId
-                    )
-                    : null;
-
-            res.json({
-                success: true,
-
-                group: {
-                    ...formatGroup(group),
-
-                    membership:
-                        membership
-                            ? {
-                                role:
-                                    membership.role,
-
-                                status:
-                                    membership.status
-                            }
-                            : null
+        const groups = result.rows.map((row) =>
+            formatGroup({
+                ...row,
+                membership: {
+                    role: row.membership_role,
+                    status: row.membership_status
                 }
-            });
+            })
+        );
 
-        } catch (error) {
+        res.json({
+            success: true,
+            groups
+        });
+    } catch (error) {
+        console.error("My groups error:", error);
 
-            console.error(
-                "GROUP DETAILS ERROR:",
-                error
-            );
+        res.status(500).json({
+            success: false,
+            message: "Unable to load your groups."
+        });
+    }
+});
 
-            res.status(500).json({
+app.get("/api/groups/:id", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.query.userId);
+
+        if (!groupId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to load group."
+                message: "Invalid group ID."
             });
         }
+
+        const group = await getGroup(groupId);
+
+        if (!group) {
+            return res.status(404).json({
+                success: false,
+                message: "Group not found."
+            });
+        }
+
+        const membership = userId
+            ? await getMembership(groupId, userId)
+            : null;
+
+        res.json({
+            success: true,
+            group: formatGroup({
+                ...group,
+                membership: membership
+                    ? {
+                          role: membership.role,
+                          status: membership.status
+                      }
+                    : null
+            })
+        });
+    } catch (error) {
+        console.error("Get group error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load group."
+        });
     }
-);
+});
 
 /* =========================================================
-   JOIN PUBLIC GROUP
+   GROUP JOIN
 ========================================================= */
 
-app.post(
-    "/api/groups/:id/join",
-    async (req, res) => {
+app.post("/api/groups/:id/join", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.body.userId);
 
-        try {
+        if (!groupId || !userId) {
+            return res.status(400).json({
+                success: false,
+                message: "Group ID and user ID are required."
+            });
+        }
 
-            const groupId =
-                toId(
-                    req.params.id
-                );
+        if (!(await userExists(userId))) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found."
+            });
+        }
 
-            const userId =
-                toId(
-                    req.body.userId
-                );
+        const group = await getGroup(groupId);
 
-            if (!groupId || !userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Invalid request."
-                });
-            }
+        if (!group) {
+            return res.status(404).json({
+                success: false,
+                message: "Group not found."
+            });
+        }
 
-            const group =
-                await getGroup(
-                    groupId
-                );
+        const existing = await getMembership(groupId, userId);
 
-            if (!group) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Group not found."
-                });
-            }
-
-            if (
-                group.group_type ===
-                "private"
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "This is a private group."
-                });
-            }
-
-            const existing =
-                await getMembership(
-                    groupId,
-                    userId
-                );
-
-            if (existing) {
-
-                if (
-                    existing.status ===
-                    "active"
-                ) {
-                    return res.json({
-                        success: true,
-                        message:
-                            "You are already a member."
-                    });
-                }
-
-                await pool.query(
-                    `
-                    UPDATE
-                        cherychat_group_members
-
-                    SET
-                        status = 'active',
-                        role = 'member',
-                        joined_at =
-                            CURRENT_TIMESTAMP
-
-                    WHERE
-                        group_id = $1
-                        AND user_id = $2
-                    `,
-                    [
-                        groupId,
-                        userId
-                    ]
-                );
-
-            } else {
-
-                await pool.query(
-                    `
-                    INSERT INTO
-                        cherychat_group_members
-                    (
-                        group_id,
-                        user_id,
-                        role,
-                        status
-                    )
-                    VALUES
-                    ($1, $2, 'member', 'active')
-                    `,
-                    [
-                        groupId,
-                        userId
-                    ]
-                );
-            }
-
-            res.json({
+        if (existing && existing.status === "active") {
+            return res.json({
                 success: true,
-                message:
-                    "You joined the group."
-            });
-
-        } catch (error) {
-
-            console.error(
-                "JOIN GROUP ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to join group."
+                message: "You are already a member of this group.",
+                membership: existing
             });
         }
+
+        if (group.group_type === "private") {
+            return res.status(403).json({
+                success: false,
+                message: "This is a private group. Request to join instead."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            INSERT INTO cherychat_group_members
+                (
+                    group_id,
+                    user_id,
+                    role,
+                    status
+                )
+            VALUES
+                ($1, $2, 'member', 'active')
+            ON CONFLICT (group_id, user_id)
+            DO UPDATE SET
+                status = 'active',
+                role = CASE
+                    WHEN cherychat_group_members.role = 'owner'
+                    THEN 'owner'
+                    ELSE 'member'
+                END
+            RETURNING *
+            `,
+            [groupId, userId]
+        );
+
+        res.json({
+            success: true,
+            message: "Joined group successfully.",
+            membership: result.rows[0]
+        });
+    } catch (error) {
+        console.error("Join group error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to join group."
+        });
     }
-);
+});
 
-/* =========================================================
-   PRIVATE GROUP REQUEST
-========================================================= */
+app.post("/api/groups/:id/request", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.body.userId);
 
-app.post(
-    "/api/groups/:id/request",
-    async (req, res) => {
+        if (!groupId || !userId) {
+            return res.status(400).json({
+                success: false,
+                message: "Group ID and user ID are required."
+            });
+        }
 
-        try {
+        if (!(await userExists(userId))) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found."
+            });
+        }
 
-            const groupId =
-                toId(
-                    req.params.id
-                );
+        const group = await getGroup(groupId);
 
-            const userId =
-                toId(
-                    req.body.userId
-                );
+        if (!group) {
+            return res.status(404).json({
+                success: false,
+                message: "Group not found."
+            });
+        }
 
-            if (!groupId || !userId) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Invalid request."
-                });
-            }
+        if (group.owner_id === userId) {
+            return res.status(400).json({
+                success: false,
+                message: "You already own this group."
+            });
+        }
 
-            const group =
-                await getGroup(
-                    groupId
-                );
+        const membership = await getMembership(
+            groupId,
+            userId
+        );
 
-            if (!group) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Group not found."
-                });
-            }
+        if (membership && membership.status === "active") {
+            return res.status(400).json({
+                success: false,
+                message: "You are already a member."
+            });
+        }
 
-            const membership =
-                await getMembership(
-                    groupId,
-                    userId
-                );
-
-            if (
-                membership &&
-                membership.status === "active"
-            ) {
-                return res.json({
-                    success: true,
-                    message:
-                        "You are already a member."
-                });
-            }
-
-            const existing =
-                await pool.query(
-                    `
-                    SELECT *
-                    FROM
-                        cherychat_group_join_requests
-
-                    WHERE
-                        group_id = $1
-                        AND user_id = $2
-                    `,
-                    [
-                        groupId,
-                        userId
-                    ]
-                );
-
-            if (
-                existing.rows.length &&
-                existing.rows[0].status ===
-                    "pending"
-            ) {
-                return res.json({
-                    success: true,
-                    message:
-                        "Request already pending."
-                });
-            }
-
-            await pool.query(
-                `
-                INSERT INTO
-                    cherychat_group_join_requests
+        const result = await pool.query(
+            `
+            INSERT INTO cherychat_group_join_requests
                 (
                     group_id,
                     user_id,
                     status
                 )
-                VALUES
+            VALUES
                 ($1, $2, 'pending')
+            ON CONFLICT (group_id, user_id)
+            DO UPDATE SET
+                status = 'pending',
+                created_at = CURRENT_TIMESTAMP
+            RETURNING *
+            `,
+            [groupId, userId]
+        );
 
-                ON CONFLICT
-                (group_id, user_id)
+        res.status(201).json({
+            success: true,
+            message: "Join request sent.",
+            request: result.rows[0]
+        });
+    } catch (error) {
+        console.error("Group request error:", error);
 
-                DO UPDATE SET
-                    status = 'pending',
-                    created_at =
-                        CURRENT_TIMESTAMP
-                `,
-                [
-                    groupId,
-                    userId
-                ]
-            );
-
-            res.json({
-                success: true,
-                message:
-                    "Join request sent."
-            });
-
-        } catch (error) {
-
-            console.error(
-                "GROUP REQUEST ERROR:",
-                error
-            );
-
-            res.status(500).json({
-                success: false,
-                message:
-                    "Unable to send request."
-            });
-        }
+        res.status(500).json({
+            success: false,
+            message: "Unable to send join request."
+        });
     }
-);
+});
 
 /* =========================================================
-   GROUP REQUESTS
+   GROUP JOIN REQUESTS
 ========================================================= */
 
-app.get(
-    "/api/groups/:id/requests",
-    async (req, res) => {
+app.get("/api/groups/:id/requests", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.query.userId);
 
-        try {
-
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const userId =
-                toId(
-                    req.query.userId
-                );
-
-            if (
-                !(await isAdminOrOwner(
-                    groupId,
-                    userId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Admin access required."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT
-                        r.id,
-                        r.group_id,
-                        r.user_id,
-                        r.status,
-                        r.created_at,
-
-                        u.full_name,
-                        u.email,
-                        u.profile_picture
-
-                    FROM
-                        cherychat_group_join_requests r
-
-                    JOIN cherychat_users u
-                    ON u.id = r.user_id
-
-                    WHERE
-                        r.group_id = $1
-                        AND r.status = 'pending'
-
-                    ORDER BY
-                        r.created_at ASC
-                    `,
-                    [groupId]
-                );
-
-            res.json({
-                success: true,
-
-                requests:
-                    result.rows.map(
-                        row => ({
-
-                            id:
-                                row.id,
-
-                            groupId:
-                                row.group_id,
-
-                            userId:
-                                row.user_id,
-
-                            fullName:
-                                row.full_name,
-
-                            email:
-                                row.email,
-
-                            profilePicture:
-                                row.profile_picture ||
-                                createAvatar(
-                                    row.full_name
-                                ),
-
-                            createdAt:
-                                row.created_at
-                        })
-                    )
-            });
-
-        } catch (error) {
-
-            console.error(
-                "GROUP REQUESTS ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!groupId || !userId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to load requests."
+                message: "Group ID and user ID are required."
             });
         }
-    }
-);
 
-/* =========================================================
-   APPROVE / REJECT GROUP REQUEST
-========================================================= */
+        if (!(await isAdminOrOwner(groupId, userId))) {
+            return res.status(403).json({
+                success: false,
+                message: "Only group admins can view requests."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            SELECT
+                r.*,
+                u.full_name,
+                u.email,
+                u.phone,
+                u.profile_picture,
+                u.about
+            FROM cherychat_group_join_requests r
+            JOIN cherychat_users u
+                ON u.id = r.user_id
+            WHERE r.group_id = $1
+            ORDER BY r.created_at DESC
+            `,
+            [groupId]
+        );
+
+        res.json({
+            success: true,
+            requests: result.rows.map((row) => ({
+                id: row.id,
+                requestId: row.id,
+                groupId: row.group_id,
+                userId: row.user_id,
+                status: row.status,
+                createdAt: row.created_at,
+                user: {
+                    id: row.user_id,
+                    userId: row.user_id,
+                    fullName: row.full_name,
+                    email: row.email,
+                    phone: row.phone,
+                    profilePicture:
+                        row.profile_picture ||
+                        createAvatar(row.full_name),
+                    about: row.about || "using VibeChat"
+                }
+            }))
+        });
+    } catch (error) {
+        console.error("Get group requests error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load join requests."
+        });
+    }
+});
 
 app.post(
     "/api/groups/:id/requests/:requestId",
     async (req, res) => {
-
         try {
-
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const requestId =
-                toId(
-                    req.params.requestId
-                );
-
-            const adminId =
-                toId(
-                    req.body.userId
-                );
-
-            const action =
-                req.body.action ===
-                "reject"
-                    ? "reject"
-                    : "approve";
-
-            if (
-                !(await isAdminOrOwner(
-                    groupId,
-                    adminId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Admin access required."
-                });
-            }
-
-            const requestResult =
-                await pool.query(
-                    `
-                    SELECT *
-                    FROM
-                        cherychat_group_join_requests
-
-                    WHERE
-                        id = $1
-                        AND group_id = $2
-                    `,
-                    [
-                        requestId,
-                        groupId
-                    ]
-                );
-
-            if (!requestResult.rows.length) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Request not found."
-                });
-            }
-
-            const request =
-                requestResult.rows[0];
-
-            if (action === "reject") {
-
-                await pool.query(
-                    `
-                    UPDATE
-                        cherychat_group_join_requests
-
-                    SET status = 'rejected'
-
-                    WHERE id = $1
-                    `,
-                    [requestId]
-                );
-
-                return res.json({
-                    success: true,
-                    message:
-                        "Request rejected."
-                });
-            }
-
-            await pool.query(
-                `
-                INSERT INTO
-                    cherychat_group_members
-                (
-                    group_id,
-                    user_id,
-                    role,
-                    status
-                )
-                VALUES
-                ($1, $2, 'member', 'active')
-
-                ON CONFLICT
-                (group_id, user_id)
-
-                DO UPDATE SET
-                    status = 'active'
-                `,
-                [
-                    groupId,
-                    request.user_id
-                ]
+            const groupId = toId(req.params.id);
+            const requestId = toId(req.params.requestId);
+            const adminId = toId(
+                req.body.adminId || req.body.userId
             );
 
-            await pool.query(
+            const action = cleanText(
+                req.body.action || req.body.status,
+                30
+            ).toLowerCase();
+
+            if (!groupId || !requestId || !adminId) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Group, request and admin IDs are required."
+                });
+            }
+
+            if (!(await isAdminOrOwner(groupId, adminId))) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Only group admins can manage requests."
+                });
+            }
+
+            if (!["approve", "approved", "reject", "rejected"].includes(action)) {
+                return res.status(400).json({
+                    success: false,
+                    message: "Action must be approve or reject."
+                });
+            }
+
+            const requestResult = await pool.query(
                 `
-                UPDATE
-                    cherychat_group_join_requests
-
-                SET status = 'approved'
-
+                SELECT *
+                FROM cherychat_group_join_requests
                 WHERE id = $1
+                  AND group_id = $2
+                LIMIT 1
                 `,
-                [requestId]
+                [requestId, groupId]
+            );
+
+            if (requestResult.rows.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: "Join request not found."
+                });
+            }
+
+            const request = requestResult.rows[0];
+
+            const approved =
+                action === "approve" ||
+                action === "approved";
+
+            if (approved) {
+                await pool.query(
+                    `
+                    INSERT INTO cherychat_group_members
+                        (
+                            group_id,
+                            user_id,
+                            role,
+                            status
+                        )
+                    VALUES
+                        ($1, $2, 'member', 'active')
+                    ON CONFLICT (group_id, user_id)
+                    DO UPDATE SET
+                        status = 'active',
+                        role = CASE
+                            WHEN cherychat_group_members.role = 'owner'
+                            THEN 'owner'
+                            ELSE 'member'
+                        END
+                    `,
+                    [groupId, request.user_id]
+                );
+            }
+
+            const updated = await pool.query(
+                `
+                UPDATE cherychat_group_join_requests
+                SET status = $1
+                WHERE id = $2
+                RETURNING *
+                `,
+                [
+                    approved ? "approved" : "rejected",
+                    requestId
+                ]
             );
 
             res.json({
                 success: true,
-                message:
-                    "Member approved."
+                message: approved
+                    ? "Join request approved."
+                    : "Join request rejected.",
+                request: updated.rows[0]
             });
-
         } catch (error) {
-
-            console.error(
-                "APPROVE REQUEST ERROR:",
-                error
-            );
+            console.error("Manage request error:", error);
 
             res.status(500).json({
                 success: false,
-                message:
-                    "Unable to process request."
+                message: "Unable to manage join request."
             });
         }
     }
@@ -3722,678 +2267,481 @@ app.post(
    GROUP MEMBERS
 ========================================================= */
 
-app.get(
-    "/api/groups/:id/members",
-    async (req, res) => {
+app.get("/api/groups/:id/members", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.query.userId);
 
-        try {
-
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const userId =
-                toId(
-                    req.query.userId
-                );
-
-            if (
-                !(await isActiveMember(
-                    groupId,
-                    userId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Group membership required."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT
-                        gm.id,
-                        gm.user_id,
-                        gm.role,
-                        gm.status,
-                        gm.joined_at,
-
-                        u.full_name,
-                        u.email,
-                        u.profile_picture,
-                        u.is_online,
-                        u.last_seen
-
-                    FROM
-                        cherychat_group_members gm
-
-                    JOIN cherychat_users u
-                    ON u.id = gm.user_id
-
-                    WHERE
-                        gm.group_id = $1
-                        AND gm.status = 'active'
-
-                    ORDER BY
-
-                        CASE
-                            WHEN gm.role = 'owner'
-                            THEN 0
-
-                            WHEN gm.role = 'admin'
-                            THEN 1
-
-                            ELSE 2
-                        END,
-
-                        u.full_name ASC
-                    `,
-                    [groupId]
-                );
-
-            res.json({
-                success: true,
-
-                members:
-                    result.rows.map(
-                        row => ({
-
-                            id:
-                                row.id,
-
-                            userId:
-                                row.user_id,
-
-                            fullName:
-                                row.full_name,
-
-                            email:
-                                row.email,
-
-                            profilePicture:
-                                row.profile_picture ||
-                                createAvatar(
-                                    row.full_name
-                                ),
-
-                            role:
-                                row.role,
-
-                            status:
-                                row.status,
-
-                            isOnline:
-                                !!row.is_online,
-
-                            lastSeen:
-                                row.last_seen,
-
-                            joinedAt:
-                                row.joined_at
-                        })
-                    )
-            });
-
-        } catch (error) {
-
-            console.error(
-                "GROUP MEMBERS ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!groupId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to load members."
+                message: "Invalid group ID."
             });
         }
+
+        if (
+            userId &&
+            !(await isActiveMember(groupId, userId))
+        ) {
+            return res.status(403).json({
+                success: false,
+                message: "You must be a member to view group members."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            SELECT
+                gm.id,
+                gm.group_id,
+                gm.user_id,
+                gm.role,
+                gm.status,
+                gm.created_at,
+                u.full_name,
+                u.email,
+                u.phone,
+                u.profile_picture,
+                u.about,
+                u.is_online,
+                u.last_seen
+            FROM cherychat_group_members gm
+            JOIN cherychat_users u
+                ON u.id = gm.user_id
+            WHERE gm.group_id = $1
+              AND gm.status = 'active'
+            ORDER BY
+                CASE gm.role
+                    WHEN 'owner' THEN 0
+                    WHEN 'admin' THEN 1
+                    ELSE 2
+                END,
+                u.full_name ASC
+            `,
+            [groupId]
+        );
+
+        res.json({
+            success: true,
+            members: result.rows.map((row) => ({
+                id: row.id,
+                membershipId: row.id,
+                groupId: row.group_id,
+                userId: row.user_id,
+                role: row.role,
+                status: row.status,
+                createdAt: row.created_at,
+                fullName: row.full_name,
+                email: row.email,
+                phone: row.phone,
+                profilePicture:
+                    row.profile_picture ||
+                    createAvatar(row.full_name),
+                about: row.about || "using VibeChat",
+                isOnline: Boolean(row.is_online),
+                lastSeen: row.last_seen
+            }))
+        });
+    } catch (error) {
+        console.error("Get group members error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load group members."
+        });
     }
-);
+});
 
 /* =========================================================
    GROUP MESSAGES
 ========================================================= */
 
-app.get(
-    "/api/groups/:id/messages",
-    async (req, res) => {
+app.get("/api/groups/:id/messages", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.query.userId);
 
-        try {
-
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const userId =
-                toId(
-                    req.query.userId
-                );
-
-            if (
-                !(await isActiveMember(
-                    groupId,
-                    userId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Group membership required."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    SELECT
-                        gm.id,
-                        gm.group_id,
-                        gm.sender_id,
-                        gm.message_text,
-                        gm.created_at,
-
-                        u.full_name AS sender_name,
-                        u.profile_picture AS sender_picture
-
-                    FROM
-                        cherychat_group_messages gm
-
-                    JOIN cherychat_users u
-                    ON u.id = gm.sender_id
-
-                    WHERE
-                        gm.group_id = $1
-
-                    ORDER BY
-                        gm.created_at ASC
-
-                    LIMIT 500
-                    `,
-                    [groupId]
-                );
-
-            res.json({
-                success: true,
-
-                messages:
-                    result.rows.map(
-                        row => ({
-
-                            id:
-                                row.id,
-
-                            groupId:
-                                row.group_id,
-
-                            senderId:
-                                row.sender_id,
-
-                            senderName:
-                                row.sender_name,
-
-                            senderPicture:
-                                row.sender_picture ||
-                                createAvatar(
-                                    row.sender_name
-                                ),
-
-                            messageText:
-                                row.message_text,
-
-                            createdAt:
-                                row.created_at
-                        })
-                    )
-            });
-
-        } catch (error) {
-
-            console.error(
-                "GROUP MESSAGES ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!groupId || !userId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to load group messages."
+                message: "Group ID and user ID are required."
             });
         }
-    }
-);
 
-/* =========================================================
-   SEND GROUP MESSAGE
-========================================================= */
-
-app.post(
-    "/api/groups/:id/messages",
-    async (req, res) => {
-
-        try {
-
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const senderId =
-                toId(
-                    req.body.userId
-                );
-
-            const messageText =
-                cleanText(
-                    req.body.messageText,
-                    5000
-                );
-
-            if (
-                !(await isActiveMember(
-                    groupId,
-                    senderId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Group membership required."
-                });
-            }
-
-            if (!messageText) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Message cannot be empty."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    INSERT INTO
-                        cherychat_group_messages
-                    (
-                        group_id,
-                        sender_id,
-                        message_text
-                    )
-                    VALUES
-                    ($1, $2, $3)
-
-                    RETURNING *
-                    `,
-                    [
-                        groupId,
-                        senderId,
-                        messageText
-                    ]
-                );
-
-            res.status(201).json({
-                success: true,
-                message:
-                    result.rows[0]
-            });
-
-        } catch (error) {
-
-            console.error(
-                "SEND GROUP MESSAGE ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!(await isActiveMember(groupId, userId))) {
+            return res.status(403).json({
                 success: false,
-                message:
-                    "Unable to send group message."
+                message: "You must be a group member."
             });
         }
+
+        const result = await pool.query(
+            `
+            SELECT
+                gm.*,
+                u.full_name AS sender_name,
+                u.profile_picture AS sender_profile_picture
+            FROM cherychat_group_messages gm
+            JOIN cherychat_users u
+                ON u.id = gm.sender_id
+            WHERE gm.group_id = $1
+            ORDER BY gm.created_at ASC, gm.id ASC
+            LIMIT 1000
+            `,
+            [groupId]
+        );
+
+        res.json({
+            success: true,
+            messages: result.rows.map(formatGroupMessage)
+        });
+    } catch (error) {
+        console.error("Get group messages error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to load group messages."
+        });
     }
-);
+});
 
-/* =========================================================
-   LEAVE GROUP
-========================================================= */
+app.post("/api/groups/:id/messages", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const senderId = toId(
+            req.body.senderId || req.body.userId
+        );
 
-app.post(
-    "/api/groups/:id/leave",
-    async (req, res) => {
+        const messageText = cleanText(
+            req.body.messageText || req.body.message,
+            10000
+        );
 
-        try {
-
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const userId =
-                toId(
-                    req.body.userId
-                );
-
-            const group =
-                await getGroup(
-                    groupId
-                );
-
-            if (!group) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Group not found."
-                });
-            }
-
-            if (
-                group.owner_id ===
-                userId
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "The group owner cannot leave. Delete the group instead."
-                });
-            }
-
-            await pool.query(
-                `
-                UPDATE
-                    cherychat_group_members
-
-                SET status = 'left'
-
-                WHERE
-                    group_id = $1
-                    AND user_id = $2
-                `,
-                [
-                    groupId,
-                    userId
-                ]
-            );
-
-            res.json({
-                success: true,
-                message:
-                    "You left the group."
-            });
-
-        } catch (error) {
-
-            console.error(
-                "LEAVE GROUP ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!groupId || !senderId || !messageText) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to leave group."
+                message: "Group, sender and message are required."
             });
         }
+
+        if (!(await isActiveMember(groupId, senderId))) {
+            return res.status(403).json({
+                success: false,
+                message: "You must be a group member to send messages."
+            });
+        }
+
+        const result = await pool.query(
+            `
+            INSERT INTO cherychat_group_messages
+                (
+                    group_id,
+                    sender_id,
+                    message_text
+                )
+            VALUES
+                ($1, $2, $3)
+            RETURNING *
+            `,
+            [
+                groupId,
+                senderId,
+                messageText
+            ]
+        );
+
+        const messageResult = await pool.query(
+            `
+            SELECT
+                gm.*,
+                u.full_name AS sender_name,
+                u.profile_picture AS sender_profile_picture
+            FROM cherychat_group_messages gm
+            JOIN cherychat_users u
+                ON u.id = gm.sender_id
+            WHERE gm.id = $1
+            `,
+            [result.rows[0].id]
+        );
+
+        res.status(201).json({
+            success: true,
+            message: formatGroupMessage(
+                messageResult.rows[0]
+            )
+        });
+    } catch (error) {
+        console.error("Send group message error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to send group message."
+        });
     }
-);
+});
 
 /* =========================================================
-   REMOVE MEMBER
+   GROUP LEAVE / MEMBER MANAGEMENT
 ========================================================= */
+
+app.post("/api/groups/:id/leave", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.body.userId);
+
+        if (!groupId || !userId) {
+            return res.status(400).json({
+                success: false,
+                message: "Group ID and user ID are required."
+            });
+        }
+
+        const membership = await getMembership(
+            groupId,
+            userId
+        );
+
+        if (!membership || membership.status !== "active") {
+            return res.status(400).json({
+                success: false,
+                message: "You are not an active member."
+            });
+        }
+
+        if (membership.role === "owner") {
+            return res.status(400).json({
+                success: false,
+                message: "The group owner cannot leave. Transfer ownership or delete the group."
+            });
+        }
+
+        await pool.query(
+            `
+            UPDATE cherychat_group_members
+            SET status = 'left'
+            WHERE group_id = $1
+              AND user_id = $2
+            `,
+            [groupId, userId]
+        );
+
+        res.json({
+            success: true,
+            message: "You left the group."
+        });
+    } catch (error) {
+        console.error("Leave group error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to leave group."
+        });
+    }
+});
 
 app.delete(
     "/api/groups/:id/members/:memberId",
     async (req, res) => {
-
         try {
+            const groupId = toId(req.params.id);
+            const memberId = toId(req.params.memberId);
+            const adminId = toId(
+                req.body.adminId || req.body.userId
+            );
 
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const memberId =
-                toId(
-                    req.params.memberId
-                );
-
-            const adminId =
-                toId(
-                    req.body.userId
-                );
-
-            if (
-                !(await isAdminOrOwner(
-                    groupId,
-                    adminId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Admin access required."
-                });
-            }
-
-            const target =
-                await getMembership(
-                    groupId,
-                    memberId
-                );
-
-            if (!target) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Member not found."
-                });
-            }
-
-            if (
-                target.role ===
-                "owner"
-            ) {
+            if (!groupId || !memberId || !adminId) {
                 return res.status(400).json({
                     success: false,
-                    message:
-                        "The group owner cannot be removed."
+                    message: "Group, member and admin IDs are required."
+                });
+            }
+
+            if (!(await isAdminOrOwner(groupId, adminId))) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Only admins can remove members."
+                });
+            }
+
+            const target = await getMembership(
+                groupId,
+                memberId
+            );
+
+            if (!target || target.status !== "active") {
+                return res.status(404).json({
+                    success: false,
+                    message: "Active member not found."
+                });
+            }
+
+            if (target.role === "owner") {
+                return res.status(400).json({
+                    success: false,
+                    message: "The group owner cannot be removed."
                 });
             }
 
             await pool.query(
                 `
-                UPDATE
-                    cherychat_group_members
-
+                UPDATE cherychat_group_members
                 SET status = 'removed'
-
-                WHERE
-                    group_id = $1
-                    AND user_id = $2
+                WHERE group_id = $1
+                  AND user_id = $2
                 `,
-                [
-                    groupId,
-                    memberId
-                ]
+                [groupId, memberId]
             );
 
             res.json({
                 success: true,
-                message:
-                    "Member removed."
+                message: "Member removed."
             });
-
         } catch (error) {
-
-            console.error(
-                "REMOVE MEMBER ERROR:",
-                error
-            );
+            console.error("Remove member error:", error);
 
             res.status(500).json({
                 success: false,
-                message:
-                    "Unable to remove member."
+                message: "Unable to remove member."
             });
         }
     }
 );
-
-/* =========================================================
-   MAKE ADMIN
-========================================================= */
 
 app.post(
     "/api/groups/:id/members/:memberId/admin",
     async (req, res) => {
-
         try {
+            const groupId = toId(req.params.id);
+            const memberId = toId(req.params.memberId);
+            const adminId = toId(
+                req.body.adminId || req.body.userId
+            );
 
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const memberId =
-                toId(
-                    req.params.memberId
-                );
-
-            const adminId =
-                toId(
-                    req.body.userId
-                );
-
-            if (
-                !(await isAdminOrOwner(
-                    groupId,
-                    adminId
-                ))
-            ) {
-                return res.status(403).json({
+            if (!groupId || !memberId || !adminId) {
+                return res.status(400).json({
                     success: false,
-                    message:
-                        "Admin access required."
+                    message: "Group, member and admin IDs are required."
                 });
             }
 
-            await pool.query(
+            if (!(await isAdminOrOwner(groupId, adminId))) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Only admins can promote members."
+                });
+            }
+
+            const target = await getMembership(
+                groupId,
+                memberId
+            );
+
+            if (!target || target.status !== "active") {
+                return res.status(404).json({
+                    success: false,
+                    message: "Active member not found."
+                });
+            }
+
+            if (target.role === "owner") {
+                return res.status(400).json({
+                    success: false,
+                    message: "The owner is already above admin."
+                });
+            }
+
+            const result = await pool.query(
                 `
-                UPDATE
-                    cherychat_group_members
-
+                UPDATE cherychat_group_members
                 SET role = 'admin'
-
-                WHERE
-                    group_id = $1
-                    AND user_id = $2
-                    AND status = 'active'
-                    AND role <> 'owner'
+                WHERE group_id = $1
+                  AND user_id = $2
+                RETURNING *
                 `,
-                [
-                    groupId,
-                    memberId
-                ]
+                [groupId, memberId]
             );
 
             res.json({
                 success: true,
-                message:
-                    "Member is now an admin."
+                message: "Member promoted to admin.",
+                membership: result.rows[0]
             });
-
         } catch (error) {
-
-            console.error(
-                "MAKE ADMIN ERROR:",
-                error
-            );
+            console.error("Promote admin error:", error);
 
             res.status(500).json({
                 success: false,
-                message:
-                    "Unable to make admin."
+                message: "Unable to promote member."
             });
         }
     }
 );
 
-/* =========================================================
-   REMOVE ADMIN
-========================================================= */
-
 app.delete(
     "/api/groups/:id/members/:memberId/admin",
     async (req, res) => {
-
         try {
+            const groupId = toId(req.params.id);
+            const memberId = toId(req.params.memberId);
+            const adminId = toId(
+                req.body.adminId || req.body.userId
+            );
 
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const memberId =
-                toId(
-                    req.params.memberId
-                );
-
-            const adminId =
-                toId(
-                    req.body.userId
-                );
-
-            if (
-                !(await isAdminOrOwner(
-                    groupId,
-                    adminId
-                ))
-            ) {
-                return res.status(403).json({
+            if (!groupId || !memberId || !adminId) {
+                return res.status(400).json({
                     success: false,
-                    message:
-                        "Admin access required."
+                    message: "Group, member and admin IDs are required."
                 });
             }
 
-            await pool.query(
+            if (!(await isAdminOrOwner(groupId, adminId))) {
+                return res.status(403).json({
+                    success: false,
+                    message: "Only admins can remove admin status."
+                });
+            }
+
+            const target = await getMembership(
+                groupId,
+                memberId
+            );
+
+            if (!target || target.status !== "active") {
+                return res.status(404).json({
+                    success: false,
+                    message: "Active member not found."
+                });
+            }
+
+            if (target.role === "owner") {
+                return res.status(400).json({
+                    success: false,
+                    message: "The owner cannot lose owner status here."
+                });
+            }
+
+            const result = await pool.query(
                 `
-                UPDATE
-                    cherychat_group_members
-
+                UPDATE cherychat_group_members
                 SET role = 'member'
-
-                WHERE
-                    group_id = $1
-                    AND user_id = $2
-                    AND role = 'admin'
+                WHERE group_id = $1
+                  AND user_id = $2
+                RETURNING *
                 `,
-                [
-                    groupId,
-                    memberId
-                ]
+                [groupId, memberId]
             );
 
             res.json({
                 success: true,
-                message:
-                    "Admin role removed."
+                message: "Admin status removed.",
+                membership: result.rows[0]
             });
-
         } catch (error) {
-
-            console.error(
-                "REMOVE ADMIN ERROR:",
-                error
-            );
+            console.error("Remove admin error:", error);
 
             res.status(500).json({
                 success: false,
-                message:
-                    "Unable to remove admin role."
+                message: "Unable to remove admin status."
             });
         }
     }
@@ -4403,275 +2751,352 @@ app.delete(
    UPDATE GROUP
 ========================================================= */
 
-app.put(
-    "/api/groups/:id",
-    async (req, res) => {
+app.put("/api/groups/:id", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(
+            req.body.userId || req.body.adminId
+        );
 
-        try {
-
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const userId =
-                toId(
-                    req.body.userId
-                );
-
-            if (
-                !(await isAdminOrOwner(
-                    groupId,
-                    userId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Admin access required."
-                });
-            }
-
-            const name =
-                cleanGroupName(
-                    req.body.name
-                );
-
-            const description =
-                cleanDescription(
-                    req.body.description
-                );
-
-            if (!name) {
-                return res.status(400).json({
-                    success: false,
-                    message:
-                        "Group name is required."
-                });
-            }
-
-            const result =
-                await pool.query(
-                    `
-                    UPDATE
-                        cherychat_groups
-
-                    SET
-                        name = $1,
-                        description = $2
-
-                    WHERE id = $3
-
-                    RETURNING *
-                    `,
-                    [
-                        name,
-                        description,
-                        groupId
-                    ]
-                );
-
-            res.json({
-                success: true,
-                message:
-                    "Group updated.",
-                group:
-                    formatGroup(
-                        result.rows[0]
-                    )
-            });
-
-        } catch (error) {
-
-            console.error(
-                "UPDATE GROUP ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!groupId || !userId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to update group."
+                message: "Group ID and user ID are required."
             });
         }
+
+        if (!(await isAdminOrOwner(groupId, userId))) {
+            return res.status(403).json({
+                success: false,
+                message: "Only group admins can update the group."
+            });
+        }
+
+        const current = await getGroup(groupId);
+
+        if (!current) {
+            return res.status(404).json({
+                success: false,
+                message: "Group not found."
+            });
+        }
+
+        const name =
+            req.body.name !== undefined
+                ? cleanGroupName(req.body.name)
+                : current.name;
+
+        const description =
+            req.body.description !== undefined
+                ? cleanDescription(req.body.description)
+                : current.description;
+
+        const groupType =
+            req.body.groupType !== undefined
+                ? cleanText(req.body.groupType, 20).toLowerCase()
+                : current.group_type;
+
+        const visibility =
+            req.body.visibility !== undefined
+                ? cleanText(req.body.visibility, 20).toLowerCase()
+                : current.visibility;
+
+        if (!name) {
+            return res.status(400).json({
+                success: false,
+                message: "Group name cannot be empty."
+            });
+        }
+
+        const safeGroupType =
+            groupType === "private" ? "private" : "public";
+
+        const safeVisibility =
+            visibility === "private" ? "private" : "public";
+
+        const result = await pool.query(
+            `
+            UPDATE cherychat_groups
+            SET
+                name = $1,
+                description = $2,
+                group_type = $3,
+                visibility = $4
+            WHERE id = $5
+            RETURNING *
+            `,
+            [
+                name,
+                description,
+                safeGroupType,
+                safeVisibility,
+                groupId
+            ]
+        );
+
+        const finalGroup = await getGroup(groupId);
+
+        res.json({
+            success: true,
+            message: "Group updated successfully.",
+            group: formatGroup(finalGroup)
+        });
+    } catch (error) {
+        console.error("Update group error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to update group."
+        });
     }
-);
+});
 
 /* =========================================================
    DELETE GROUP
 ========================================================= */
 
-app.delete(
-    "/api/groups/:id",
-    async (req, res) => {
+app.delete("/api/groups/:id", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(
+            req.body.userId || req.query.userId
+        );
 
-        try {
-
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const userId =
-                toId(
-                    req.body.userId
-                );
-
-            const group =
-                await getGroup(
-                    groupId
-                );
-
-            if (!group) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Group not found."
-                });
-            }
-
-            if (
-                group.owner_id !==
-                userId
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Only the group owner can delete this group."
-                });
-            }
-
-            await pool.query(
-                `
-                DELETE FROM
-                    cherychat_groups
-                WHERE id = $1
-                `,
-                [groupId]
-            );
-
-            res.json({
-                success: true,
-                message:
-                    "Group deleted."
-            });
-
-        } catch (error) {
-
-            console.error(
-                "DELETE GROUP ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!groupId || !userId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to delete group."
+                message: "Group ID and user ID are required."
             });
         }
+
+        const group = await getGroup(groupId);
+
+        if (!group) {
+            return res.status(404).json({
+                success: false,
+                message: "Group not found."
+            });
+        }
+
+        if (group.owner_id !== userId) {
+            return res.status(403).json({
+                success: false,
+                message: "Only the group owner can delete the group."
+            });
+        }
+
+        await pool.query(
+            `
+            DELETE FROM cherychat_groups
+            WHERE id = $1
+            `,
+            [groupId]
+        );
+
+        res.json({
+            success: true,
+            message: "Group deleted successfully."
+        });
+    } catch (error) {
+        console.error("Delete group error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to delete group."
+        });
     }
-);
+});
 
 /* =========================================================
    GROUP INVITE
 ========================================================= */
 
-app.get(
-    "/api/groups/:id/invite",
-    async (req, res) => {
+app.get("/api/groups/:id/invite", async (req, res) => {
+    try {
+        const groupId = toId(req.params.id);
+        const userId = toId(req.query.userId);
 
-        try {
-
-            const groupId =
-                toId(
-                    req.params.id
-                );
-
-            const userId =
-                toId(
-                    req.query.userId
-                );
-
-            if (
-                !(await isActiveMember(
-                    groupId,
-                    userId
-                ))
-            ) {
-                return res.status(403).json({
-                    success: false,
-                    message:
-                        "Group membership required."
-                });
-            }
-
-            const group =
-                await getGroup(
-                    groupId
-                );
-
-            if (!group) {
-                return res.status(404).json({
-                    success: false,
-                    message:
-                        "Group not found."
-                });
-            }
-
-            res.json({
-                success: true,
-
-                inviteCode:
-                    group.invite_code,
-
-                inviteLink:
-                    `https://cherychat.onrender.com/dashboard.html?group=${group.invite_code}`
-            });
-
-        } catch (error) {
-
-            console.error(
-                "INVITE ERROR:",
-                error
-            );
-
-            res.status(500).json({
+        if (!groupId || !userId) {
+            return res.status(400).json({
                 success: false,
-                message:
-                    "Unable to create invite."
+                message: "Group ID and user ID are required."
             });
         }
+
+        const group = await getGroup(groupId);
+
+        if (!group) {
+            return res.status(404).json({
+                success: false,
+                message: "Group not found."
+            });
+        }
+
+        if (!(await isActiveMember(groupId, userId))) {
+            return res.status(403).json({
+                success: false,
+                message: "You must be a member to get the invite."
+            });
+        }
+
+        res.json({
+            success: true,
+            inviteCode: group.invite_code,
+            groupId: group.id,
+            inviteLink: `/join-group.html?code=${encodeURIComponent(
+                group.invite_code
+            )}`
+        });
+    } catch (error) {
+        console.error("Group invite error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to generate group invite."
+        });
     }
-);
+});
+
+/* =========================================================
+   INVITE CODE JOIN
+========================================================= */
+
+app.post("/api/groups/join-by-code", async (req, res) => {
+    try {
+        const userId = toId(req.body.userId);
+        const inviteCode = cleanText(
+            req.body.inviteCode,
+            100
+        ).toUpperCase();
+
+        if (!userId || !inviteCode) {
+            return res.status(400).json({
+                success: false,
+                message: "User ID and invite code are required."
+            });
+        }
+
+        if (!(await userExists(userId))) {
+            return res.status(404).json({
+                success: false,
+                message: "User not found."
+            });
+        }
+
+        const groupResult = await pool.query(
+            `
+            SELECT id
+            FROM cherychat_groups
+            WHERE invite_code = $1
+            LIMIT 1
+            `,
+            [inviteCode]
+        );
+
+        if (groupResult.rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: "Invalid group invite code."
+            });
+        }
+
+        const groupId = groupResult.rows[0].id;
+        const group = await getGroup(groupId);
+
+        const existing = await getMembership(
+            groupId,
+            userId
+        );
+
+        if (existing && existing.status === "active") {
+            return res.json({
+                success: true,
+                message: "You are already a member.",
+                group: formatGroup(group)
+            });
+        }
+
+        await pool.query(
+            `
+            INSERT INTO cherychat_group_members
+                (
+                    group_id,
+                    user_id,
+                    role,
+                    status
+                )
+            VALUES
+                ($1, $2, 'member', 'active')
+            ON CONFLICT (group_id, user_id)
+            DO UPDATE SET
+                status = 'active'
+            `,
+            [groupId, userId]
+        );
+
+        res.json({
+            success: true,
+            message: "Joined group successfully.",
+            group: formatGroup(group)
+        });
+    } catch (error) {
+        console.error("Join by code error:", error);
+
+        res.status(500).json({
+            success: false,
+            message: "Unable to join group."
+        });
+    }
+});
+
+/* =========================================================
+   404
+========================================================= */
+
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        message: "VibeChat API route not found.",
+        path: req.path
+    });
+});
+
+/* =========================================================
+   GLOBAL ERROR HANDLER
+========================================================= */
+
+app.use((error, req, res, next) => {
+    console.error("Unhandled server error:", error);
+
+    if (res.headersSent) {
+        return next(error);
+    }
+
+    res.status(500).json({
+        success: false,
+        message: "An unexpected server error occurred."
+    });
+});
 
 /* =========================================================
    START SERVER
 ========================================================= */
 
-const PORT =
-    process.env.PORT || 10000;
+async function startServer() {
+    try {
+        await initializeDatabase();
 
-initializeDatabase()
-    .then(() => {
-
-        app.listen(
-            PORT,
-            () => {
-
-                console.log(
-                    `VibeChat backend running on port ${PORT}`
-                );
-
-            }
-        );
-
-    })
-    .catch(error => {
-
+        app.listen(PORT, () => {
+            console.log(`VibeChat backend running on port ${PORT}`);
+        });
+    } catch (error) {
         console.error(
-            "DATABASE INITIALIZATION ERROR:",
+            "Failed to initialize VibeChat backend:",
             error
         );
 
         process.exit(1);
-    });
+    }
+}
+
+startServer();
