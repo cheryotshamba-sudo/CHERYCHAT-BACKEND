@@ -6,7 +6,8 @@ const { Pool } = require("pg");
 const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "15mb" }));
+app.use(express.json({ limit: "25mb" }));
+app.use(express.urlencoded({ extended: true, limit: "25mb" }));
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
@@ -15,141 +16,148 @@ const pool = new Pool({
         : false
 });
 
-/* =========================================================
-   DATABASE
-========================================================= */
+function clean(value) {
+    return String(value ?? "").trim();
+}
+
+function numberId(value) {
+    const id = Number(value);
+    return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+function getId(value) {
+    if (value && typeof value === "object") {
+        return numberId(
+            value.id ||
+            value.userId ||
+            value.user_id
+        );
+    }
+
+    return numberId(value);
+}
+
+function sendError(res, status, message, error = null) {
+    if (error) {
+        console.error(message, error);
+    }
+
+    return res.status(status).json({
+        success: false,
+        message
+    });
+}
 
 async function setupDatabase() {
-    try {
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_users (
-                id SERIAL PRIMARY KEY,
-                full_name TEXT NOT NULL,
-                email TEXT UNIQUE,
-                phone TEXT UNIQUE,
-                password_hash TEXT NOT NULL,
-                profile_picture TEXT,
-                about TEXT DEFAULT 'using VibeChat',
-                is_online BOOLEAN DEFAULT FALSE,
-                last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_users (
+            id SERIAL PRIMARY KEY,
+            full_name TEXT NOT NULL,
+            email TEXT UNIQUE,
+            phone TEXT UNIQUE,
+            password_hash TEXT NOT NULL,
+            profile_picture TEXT,
+            about TEXT DEFAULT 'using VibeChat',
+            is_online BOOLEAN DEFAULT FALSE,
+            last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
 
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_conversations (
-                id SERIAL PRIMARY KEY,
-                user_one INTEGER NOT NULL,
-                user_two INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                CONSTRAINT different_users CHECK (user_one <> user_two),
-                CONSTRAINT unique_conversation UNIQUE (user_one, user_two)
-            );
-        `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_conversations (
+            id SERIAL PRIMARY KEY,
+            user_one INTEGER NOT NULL,
+            user_two INTEGER NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            CONSTRAINT different_users CHECK (user_one <> user_two),
+            CONSTRAINT unique_conversation UNIQUE (user_one, user_two)
+        );
+    `);
 
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_messages (
-                id SERIAL PRIMARY KEY,
-                conversation_id INTEGER NOT NULL,
-                sender_id INTEGER NOT NULL,
-                receiver_id INTEGER NOT NULL,
-                message_text TEXT NOT NULL,
-                is_read BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_messages (
+            id SERIAL PRIMARY KEY,
+            conversation_id INTEGER NOT NULL,
+            sender_id INTEGER NOT NULL,
+            receiver_id INTEGER NOT NULL,
+            message_text TEXT NOT NULL,
+            is_read BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
 
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_groups (
-                id SERIAL PRIMARY KEY,
-                name TEXT NOT NULL,
-                description TEXT DEFAULT '',
-                group_picture TEXT,
-                creator_id INTEGER NOT NULL,
-                is_private BOOLEAN DEFAULT FALSE,
-                join_fee NUMERIC DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_groups (
+            id SERIAL PRIMARY KEY,
+            name TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            group_picture TEXT,
+            creator_id INTEGER NOT NULL,
+            is_private BOOLEAN DEFAULT FALSE,
+            join_fee NUMERIC DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
 
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_group_members (
-                id SERIAL PRIMARY KEY,
-                group_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                role TEXT DEFAULT 'member',
-                joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(group_id, user_id)
-            );
-        `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_group_members (
+            id SERIAL PRIMARY KEY,
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            role TEXT DEFAULT 'member',
+            joined_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(group_id, user_id)
+        );
+    `);
 
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_group_messages (
-                id SERIAL PRIMARY KEY,
-                group_id INTEGER NOT NULL,
-                sender_id INTEGER NOT NULL,
-                message_text TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-        `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_group_messages (
+            id SERIAL PRIMARY KEY,
+            group_id INTEGER NOT NULL,
+            sender_id INTEGER NOT NULL,
+            message_text TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+    `);
 
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_group_requests (
-                id SERIAL PRIMARY KEY,
-                group_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                status TEXT DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(group_id, user_id)
-            );
-        `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_group_requests (
+            id SERIAL PRIMARY KEY,
+            group_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(group_id, user_id)
+        );
+    `);
 
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_stories (
-                id SERIAL PRIMARY KEY,
-                user_id INTEGER NOT NULL,
-                media_type TEXT NOT NULL,
-                media_data TEXT NOT NULL,
-                caption TEXT DEFAULT '',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP DEFAULT (CURRENT_TIMESTAMP + INTERVAL '24 hours')
-            );
-        `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_stories (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER NOT NULL,
+            media_type TEXT NOT NULL,
+            media_data TEXT NOT NULL,
+            caption TEXT DEFAULT '',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            expires_at TIMESTAMP DEFAULT (
+                CURRENT_TIMESTAMP + INTERVAL '24 hours'
+            )
+        );
+    `);
 
-        await pool.query(`
-            CREATE TABLE IF NOT EXISTS cherychat_story_views (
-                id SERIAL PRIMARY KEY,
-                story_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                viewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(story_id, user_id)
-            );
-        `);
+    await pool.query(`
+        CREATE TABLE IF NOT EXISTS cherychat_story_views (
+            id SERIAL PRIMARY KEY,
+            story_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL,
+            viewed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(story_id, user_id)
+        );
+    `);
 
-        console.log("VibeChat database ready.");
-    } catch (error) {
-        console.error("Database setup error:", error);
-    }
+    console.log("VibeChat database ready.");
 }
-
-setupDatabase();
-
-/* =========================================================
-   HELPERS
-========================================================= */
-
-function validId(value) {
-    const id = Number(value);
-    return Number.isInteger(id) && id > 0;
-}
-
-function clean(value) {
-    return String(value || "").trim();
-}
-
-/* =========================================================
-   ROOT
-========================================================= */
 
 app.get("/", (req, res) => {
     res.json({
@@ -175,21 +183,21 @@ app.get("/health", async (req, res) => {
             service: "VibeChat API"
         });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            status: "unhealthy"
-        });
+        sendError(
+            res,
+            500,
+            "Database connection failed.",
+            error
+        );
     }
 });
-
-/* =========================================================
-   REGISTER
-========================================================= */
 
 app.post("/api/register", async (req, res) => {
     try {
         const fullName = clean(
-            req.body.full_name || req.body.fullName
+            req.body.full_name ||
+            req.body.fullName ||
+            req.body.name
         );
 
         const email = clean(
@@ -205,24 +213,27 @@ app.post("/api/register", async (req, res) => {
         );
 
         if (!fullName) {
-            return res.status(400).json({
-                success: false,
-                message: "Full name is required."
-            });
+            return sendError(
+                res,
+                400,
+                "Full name is required."
+            );
         }
 
         if (!email && !phone) {
-            return res.status(400).json({
-                success: false,
-                message: "Email or phone number is required."
-            });
+            return sendError(
+                res,
+                400,
+                "Email or phone number is required."
+            );
         }
 
         if (password.length < 6) {
-            return res.status(400).json({
-                success: false,
-                message: "Password must be at least 6 characters."
-            });
+            return sendError(
+                res,
+                400,
+                "Password must be at least 6 characters."
+            );
         }
 
         const existing = await pool.query(
@@ -239,13 +250,15 @@ app.post("/api/register", async (req, res) => {
         );
 
         if (existing.rows.length) {
-            return res.status(409).json({
-                success: false,
-                message: "Email or phone number is already registered."
-            });
+            return sendError(
+                res,
+                409,
+                "Email or phone number is already registered."
+            );
         }
 
-        const hash = await bcrypt.hash(password, 10);
+        const passwordHash =
+            await bcrypt.hash(password, 10);
 
         const result = await pool.query(
             `
@@ -255,9 +268,11 @@ app.post("/api/register", async (req, res) => {
                 email,
                 phone,
                 password_hash,
-                about
+                about,
+                is_online,
+                last_seen
             )
-            VALUES ($1,$2,$3,$4,$5)
+            VALUES ($1,$2,$3,$4,$5,TRUE,CURRENT_TIMESTAMP)
             RETURNING
                 id,
                 full_name,
@@ -273,7 +288,7 @@ app.post("/api/register", async (req, res) => {
                 fullName,
                 email || null,
                 phone || null,
-                hash,
+                passwordHash,
                 "using VibeChat"
             ]
         );
@@ -284,25 +299,22 @@ app.post("/api/register", async (req, res) => {
             user: result.rows[0]
         });
     } catch (error) {
-        console.error("Register error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to create account."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to create account.",
+            error
+        );
     }
 });
-
-/* =========================================================
-   LOGIN
-========================================================= */
 
 app.post("/api/login", async (req, res) => {
     try {
         const identifier = clean(
             req.body.email ||
             req.body.phone ||
-            req.body.identifier
+            req.body.identifier ||
+            req.body.login
         ).toLowerCase();
 
         const password = String(
@@ -310,47 +322,54 @@ app.post("/api/login", async (req, res) => {
         );
 
         if (!identifier || !password) {
-            return res.status(400).json({
-                success: false,
-                message: "Email/phone and password are required."
-            });
+            return sendError(
+                res,
+                400,
+                "Email/phone and password are required."
+            );
         }
 
         const result = await pool.query(
             `
             SELECT *
             FROM cherychat_users
-            WHERE email = $1 OR phone = $1
+            WHERE
+                LOWER(COALESCE(email,'')) = $1
+                OR phone = $1
             LIMIT 1
             `,
             [identifier]
         );
 
         if (!result.rows.length) {
-            return res.status(401).json({
-                success: false,
-                message: "Invalid login details."
-            });
+            return sendError(
+                res,
+                401,
+                "Invalid login details."
+            );
         }
 
         const user = result.rows[0];
 
-        const correct = await bcrypt.compare(
-            password,
-            user.password_hash
-        );
+        const validPassword =
+            await bcrypt.compare(
+                password,
+                user.password_hash
+            );
 
-        if (!correct) {
-            return res.status(401).json({
-                success: false,
-                message: "Invalid login details."
-            });
+        if (!validPassword) {
+            return sendError(
+                res,
+                401,
+                "Invalid login details."
+            );
         }
 
         await pool.query(
             `
             UPDATE cherychat_users
-            SET is_online = TRUE,
+            SET
+                is_online = TRUE,
                 last_seen = CURRENT_TIMESTAMP
             WHERE id = $1
             `,
@@ -365,25 +384,20 @@ app.post("/api/login", async (req, res) => {
             user
         });
     } catch (error) {
-        console.error("Login error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to login."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to login.",
+            error
+        );
     }
 });
-
-/* =========================================================
-   USER SEARCH
-========================================================= */
 
 app.get("/api/users/search", async (req, res) => {
     try {
         const q = clean(req.query.q);
-        const currentUserId = Number(
-            req.query.userId || 0
-        );
+        const userId =
+            numberId(req.query.userId) || 0;
 
         if (!q) {
             return res.json({
@@ -410,14 +424,13 @@ app.get("/api/users/search", async (req, res) => {
                     OR email ILIKE $1
                     OR phone ILIKE $1
                 )
-                AND
-                ($2 = 0 OR id <> $2)
-            ORDER BY full_name
+                AND ($2 = 0 OR id <> $2)
+            ORDER BY full_name ASC
             LIMIT 50
             `,
             [
                 `%${q}%`,
-                currentUserId
+                userId
             ]
         );
 
@@ -426,28 +439,26 @@ app.get("/api/users/search", async (req, res) => {
             users: result.rows
         });
     } catch (error) {
-        console.error("Search error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to search users."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to search users.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   GET USER
-========================================================= */
-
 app.get("/api/users/:id", async (req, res) => {
     try {
-        const id = Number(req.params.id);
+        const id =
+            numberId(req.params.id);
 
-        if (!validId(id)) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user ID is required."
-            });
+        if (!id) {
+            return sendError(
+                res,
+                400,
+                "Valid user ID is required."
+            );
         }
 
         const result = await pool.query(
@@ -469,10 +480,11 @@ app.get("/api/users/:id", async (req, res) => {
         );
 
         if (!result.rows.length) {
-            return res.status(404).json({
-                success: false,
-                message: "User not found."
-            });
+            return sendError(
+                res,
+                404,
+                "User not found."
+            );
         }
 
         res.json({
@@ -480,32 +492,33 @@ app.get("/api/users/:id", async (req, res) => {
             user: result.rows[0]
         });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: "Unable to load user."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to load user.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   ONLINE
-========================================================= */
-
 app.put("/api/users/:id/online", async (req, res) => {
     try {
-        const id = Number(req.params.id);
+        const id =
+            numberId(req.params.id);
 
-        if (!validId(id)) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user ID is required."
-            });
+        if (!id) {
+            return sendError(
+                res,
+                400,
+                "Valid user ID is required."
+            );
         }
 
         await pool.query(
             `
             UPDATE cherychat_users
-            SET is_online = TRUE,
+            SET
+                is_online = TRUE,
                 last_seen = CURRENT_TIMESTAMP
             WHERE id = $1
             `,
@@ -517,32 +530,33 @@ app.put("/api/users/:id/online", async (req, res) => {
             online: true
         });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: "Unable to update status."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to update status.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   OFFLINE
-========================================================= */
-
 app.put("/api/users/:id/offline", async (req, res) => {
     try {
-        const id = Number(req.params.id);
+        const id =
+            numberId(req.params.id);
 
-        if (!validId(id)) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user ID is required."
-            });
+        if (!id) {
+            return sendError(
+                res,
+                400,
+                "Valid user ID is required."
+            );
         }
 
         await pool.query(
             `
             UPDATE cherychat_users
-            SET is_online = FALSE,
+            SET
+                is_online = FALSE,
                 last_seen = CURRENT_TIMESTAMP
             WHERE id = $1
             `,
@@ -554,24 +568,24 @@ app.put("/api/users/:id/offline", async (req, res) => {
             online: false
         });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: "Unable to update status."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to update status.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   PROFILE
-========================================================= */
-
 app.put("/api/users/:id/profile", async (req, res) => {
     try {
-        const id = Number(req.params.id);
+        const id =
+            numberId(req.params.id);
 
         const fullName = clean(
             req.body.fullName ||
-            req.body.full_name
+            req.body.full_name ||
+            req.body.name
         );
 
         const about =
@@ -579,18 +593,20 @@ app.put("/api/users/:id/profile", async (req, res) => {
                 ? String(req.body.about)
                 : null;
 
-        if (!validId(id)) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user ID is required."
-            });
+        if (!id) {
+            return sendError(
+                res,
+                400,
+                "Valid user ID is required."
+            );
         }
 
         if (!fullName) {
-            return res.status(400).json({
-                success: false,
-                message: "Name cannot be empty."
-            });
+            return sendError(
+                res,
+                400,
+                "Name cannot be empty."
+            );
         }
 
         const result = await pool.query(
@@ -619,10 +635,11 @@ app.put("/api/users/:id/profile", async (req, res) => {
         );
 
         if (!result.rows.length) {
-            return res.status(404).json({
-                success: false,
-                message: "User not found."
-            });
+            return sendError(
+                res,
+                404,
+                "User not found."
+            );
         }
 
         res.json({
@@ -630,41 +647,40 @@ app.put("/api/users/:id/profile", async (req, res) => {
             user: result.rows[0]
         });
     } catch (error) {
-        console.error("Profile error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to update profile."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to update profile.",
+            error
+        );
     }
 });
-
-/* =========================================================
-   PROFILE PICTURE
-========================================================= */
 
 app.put(
     "/api/users/:id/profile-picture",
     async (req, res) => {
         try {
-            const id = Number(req.params.id);
+            const id =
+                numberId(req.params.id);
 
             const picture =
                 req.body.profilePicture ||
                 req.body.profile_picture;
 
-            if (!validId(id)) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Valid user ID is required."
-                });
+            if (!id) {
+                return sendError(
+                    res,
+                    400,
+                    "Valid user ID is required."
+                );
             }
 
             if (!picture) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Profile picture is required."
-                });
+                return sendError(
+                    res,
+                    400,
+                    "Profile picture is required."
+                );
             }
 
             const result = await pool.query(
@@ -683,14 +699,18 @@ app.put(
                     last_seen,
                     created_at
                 `,
-                [picture, id]
+                [
+                    picture,
+                    id
+                ]
             );
 
             if (!result.rows.length) {
-                return res.status(404).json({
-                    success: false,
-                    message: "User not found."
-                });
+                return sendError(
+                    res,
+                    404,
+                    "User not found."
+                );
             }
 
             res.json({
@@ -698,83 +718,62 @@ app.put(
                 user: result.rows[0]
             });
         } catch (error) {
-            console.error("Picture error:", error);
-
-            res.status(500).json({
-                success: false,
-                message: "Unable to update profile picture."
-            });
+            sendError(
+                res,
+                500,
+                "Unable to update profile picture.",
+                error
+            );
         }
     }
 );
 
-/* =========================================================
-   CONVERSATION
-========================================================= */
-
 app.post("/api/conversations", async (req, res) => {
     try {
-        const userId = Number(
-            req.body.userId
-        );
+        const userId =
+            getId(req.body.userId) ||
+            getId(req.body.id);
 
-        const otherUserId = Number(
-            req.body.otherUserId
-        );
+        const otherUserId =
+            getId(req.body.otherUserId) ||
+            getId(req.body.receiverId) ||
+            getId(req.body.otherUser);
 
-        if (
-            !validId(userId) ||
-            !validId(otherUserId)
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user IDs are required."
-            });
+        if (!userId || !otherUserId) {
+            return sendError(
+                res,
+                400,
+                "Valid user IDs are required."
+            );
         }
 
         if (userId === otherUserId) {
-            return res.status(400).json({
-                success: false,
-                message: "You cannot chat with yourself."
-            });
+            return sendError(
+                res,
+                400,
+                "You cannot chat with yourself."
+            );
         }
 
-        const one = Math.min(
-            userId,
-            otherUserId
-        );
+        const one =
+            Math.min(userId, otherUserId);
 
-        const two = Math.max(
-            userId,
-            otherUserId
-        );
-
-        const existing = await pool.query(
-            `
-            SELECT *
-            FROM cherychat_conversations
-            WHERE user_one = $1
-            AND user_two = $2
-            LIMIT 1
-            `,
-            [one, two]
-        );
-
-        if (existing.rows.length) {
-            return res.json({
-                success: true,
-                conversation: existing.rows[0]
-            });
-        }
+        const two =
+            Math.max(userId, otherUserId);
 
         const result = await pool.query(
             `
             INSERT INTO cherychat_conversations
-            (user_one, user_two)
+            (user_one,user_two)
             VALUES ($1,$2)
+            ON CONFLICT (user_one,user_two)
+            DO UPDATE SET user_one = EXCLUDED.user_one
             RETURNING *
             `,
-            [one, two]
+            [
+                one,
+                two
+            ]
         );
 
         res.json({
@@ -782,30 +781,27 @@ app.post("/api/conversations", async (req, res) => {
             conversation: result.rows[0]
         });
     } catch (error) {
-        console.error("Conversation error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to create conversation."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to create conversation.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   LIST CONVERSATIONS
-========================================================= */
-
 app.get("/api/conversations", async (req, res) => {
     try {
-        const id = Number(
-            req.query.userId
-        );
+        const userId =
+            getId(req.query.userId) ||
+            getId(req.query.id);
 
-        if (!validId(id)) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user ID is required."
-            });
+        if (!userId) {
+            return sendError(
+                res,
+                400,
+                "Valid user ID is required."
+            );
         }
 
         const result = await pool.query(
@@ -866,7 +862,7 @@ app.get("/api/conversations", async (req, res) => {
                     created_at
                 FROM cherychat_messages
                 WHERE conversation_id = c.id
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id DESC
                 LIMIT 1
             ) m ON TRUE
 
@@ -880,82 +876,75 @@ app.get("/api/conversations", async (req, res) => {
                     c.created_at
                 ) DESC
             `,
-            [id]
+            [userId]
         );
-
-        const conversations =
-            result.rows.map(row => ({
-                conversationId:
-                    row.conversation_id,
-
-                otherUser: {
-                    id: row.other_user_id,
-                    fullName:
-                        row.other_user_name,
-                    profilePicture:
-                        row.other_user_picture,
-                    about:
-                        row.other_user_about,
-                    isOnline:
-                        row.other_user_online,
-                    lastSeen:
-                        row.other_user_last_seen
-                },
-
-                lastMessage:
-                    row.last_message,
-
-                lastMessageTime:
-                    row.last_message_time
-            }));
 
         res.json({
             success: true,
-            conversations
+            conversations:
+                result.rows.map(row => ({
+                    conversationId:
+                        Number(row.conversation_id),
+
+                    otherUser: {
+                        id:
+                            Number(row.other_user_id),
+
+                        fullName:
+                            row.other_user_name,
+
+                        profilePicture:
+                            row.other_user_picture,
+
+                        about:
+                            row.other_user_about,
+
+                        isOnline:
+                            row.other_user_online,
+
+                        lastSeen:
+                            row.other_user_last_seen
+                    },
+
+                    lastMessage:
+                        row.last_message || "",
+
+                    lastMessageTime:
+                        row.last_message_time
+                }))
         });
     } catch (error) {
-        console.error("Conversations error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to load conversations."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to load conversations.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   PRIVATE MESSAGES
-========================================================= */
-
 app.get("/api/messages", async (req, res) => {
     try {
-        const userId = Number(
-            req.query.userId
-        );
+        const userId =
+            getId(req.query.userId);
 
-        const otherUserId = Number(
-            req.query.otherUserId
-        );
+        const otherUserId =
+            getId(req.query.otherUserId) ||
+            getId(req.query.receiverId);
 
-        if (
-            !validId(userId) ||
-            !validId(otherUserId)
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user IDs are required."
-            });
+        if (!userId || !otherUserId) {
+            return sendError(
+                res,
+                400,
+                "Valid user IDs are required."
+            );
         }
 
-        const one = Math.min(
-            userId,
-            otherUserId
-        );
+        const one =
+            Math.min(userId, otherUserId);
 
-        const two = Math.max(
-            userId,
-            otherUserId
-        );
+        const two =
+            Math.max(userId, otherUserId);
 
         const conversation =
             await pool.query(
@@ -966,7 +955,10 @@ app.get("/api/messages", async (req, res) => {
                 AND user_two = $2
                 LIMIT 1
                 `,
-                [one, two]
+                [
+                    one,
+                    two
+                ]
             );
 
         if (!conversation.rows.length) {
@@ -975,9 +967,6 @@ app.get("/api/messages", async (req, res) => {
                 messages: []
             });
         }
-
-        const conversationId =
-            conversation.rows[0].id;
 
         const result = await pool.query(
             `
@@ -991,9 +980,11 @@ app.get("/api/messages", async (req, res) => {
                 created_at
             FROM cherychat_messages
             WHERE conversation_id = $1
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, id ASC
             `,
-            [conversationId]
+            [
+                conversation.rows[0].id
+            ]
         );
 
         res.json({
@@ -1001,28 +992,26 @@ app.get("/api/messages", async (req, res) => {
             messages: result.rows
         });
     } catch (error) {
-        console.error("Messages error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to load messages."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to load messages.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   SEND PRIVATE MESSAGE
-========================================================= */
-
 app.post("/api/messages", async (req, res) => {
     try {
-        const senderId = Number(
-            req.body.senderId
-        );
+        const senderId =
+            getId(req.body.senderId) ||
+            getId(req.body.sender_id) ||
+            getId(req.body.userId);
 
-        const receiverId = Number(
-            req.body.receiverId
-        );
+        const receiverId =
+            getId(req.body.receiverId) ||
+            getId(req.body.receiver_id) ||
+            getId(req.body.otherUserId);
 
         const messageText = clean(
             req.body.messageText ||
@@ -1030,133 +1019,109 @@ app.post("/api/messages", async (req, res) => {
             req.body.text
         );
 
-        if (
-            !validId(senderId) ||
-            !validId(receiverId)
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid sender and receiver IDs are required."
-            });
+        if (!senderId || !receiverId) {
+            return sendError(
+                res,
+                400,
+                "Valid sender and receiver IDs are required."
+            );
         }
 
         if (!messageText) {
-            return res.status(400).json({
-                success: false,
-                message: "Message cannot be empty."
-            });
+            return sendError(
+                res,
+                400,
+                "Message cannot be empty."
+            );
         }
 
-        const one = Math.min(
-            senderId,
-            receiverId
-        );
+        if (senderId === receiverId) {
+            return sendError(
+                res,
+                400,
+                "You cannot message yourself."
+            );
+        }
 
-        const two = Math.max(
-            senderId,
-            receiverId
-        );
+        const one =
+            Math.min(senderId, receiverId);
 
-        let conversation =
+        const two =
+            Math.max(senderId, receiverId);
+
+        const conversation =
             await pool.query(
                 `
-                SELECT id
-                FROM cherychat_conversations
-                WHERE user_one = $1
-                AND user_two = $2
-                LIMIT 1
+                INSERT INTO cherychat_conversations
+                (user_one,user_two)
+                VALUES ($1,$2)
+                ON CONFLICT (user_one,user_two)
+                DO UPDATE SET user_one = EXCLUDED.user_one
+                RETURNING id
                 `,
-                [one, two]
+                [
+                    one,
+                    two
+                ]
             );
 
-        let conversationId;
-
-        if (!conversation.rows.length) {
-            const created =
-                await pool.query(
-                    `
-                    INSERT INTO cherychat_conversations
-                    (user_one,user_two)
-                    VALUES ($1,$2)
-                    RETURNING id
-                    `,
-                    [one, two]
-                );
-
-            conversationId =
-                created.rows[0].id;
-        } else {
-            conversationId =
-                conversation.rows[0].id;
-        }
-
-        const result = await pool.query(
-            `
-            INSERT INTO cherychat_messages
-            (
-                conversation_id,
-                sender_id,
-                receiver_id,
-                message_text
-            )
-            VALUES ($1,$2,$3,$4)
-            RETURNING *
-            `,
-            [
-                conversationId,
-                senderId,
-                receiverId,
-                messageText
-            ]
-        );
+        const result =
+            await pool.query(
+                `
+                INSERT INTO cherychat_messages
+                (
+                    conversation_id,
+                    sender_id,
+                    receiver_id,
+                    message_text
+                )
+                VALUES ($1,$2,$3,$4)
+                RETURNING *
+                `,
+                [
+                    conversation.rows[0].id,
+                    senderId,
+                    receiverId,
+                    messageText
+                ]
+            );
 
         res.status(201).json({
             success: true,
             message: result.rows[0]
         });
     } catch (error) {
-        console.error("Send message error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to send message."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to send message.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   READ MESSAGES
-========================================================= */
-
 app.put("/api/messages/read", async (req, res) => {
     try {
-        const userId = Number(
-            req.body.userId
-        );
+        const userId =
+            getId(req.body.userId);
 
-        const otherUserId = Number(
-            req.body.otherUserId
-        );
+        const otherUserId =
+            getId(req.body.otherUserId) ||
+            getId(req.body.receiverId);
 
-        if (
-            !validId(userId) ||
-            !validId(otherUserId)
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user IDs are required."
-            });
+        if (!userId || !otherUserId) {
+            return sendError(
+                res,
+                400,
+                "Valid user IDs are required."
+            );
         }
 
-        const one = Math.min(
-            userId,
-            otherUserId
-        );
+        const one =
+            Math.min(userId, otherUserId);
 
-        const two = Math.max(
-            userId,
-            otherUserId
-        );
+        const two =
+            Math.max(userId, otherUserId);
 
         await pool.query(
             `
@@ -1180,23 +1145,19 @@ app.put("/api/messages/read", async (req, res) => {
             success: true
         });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: "Unable to mark messages as read."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to mark messages as read.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   GROUPS
-========================================================= */
-
 app.get("/api/groups", async (req, res) => {
     try {
-        const q = clean(req.query.q);
-        const userId = Number(
-            req.query.userId || 0
-        );
+        const q =
+            clean(req.query.q);
 
         let result;
 
@@ -1215,8 +1176,11 @@ app.get("/api/groups", async (req, res) => {
                 WHERE
                     g.name ILIKE $1
                     OR g.description ILIKE $1
-                GROUP BY g.id, u.full_name
-                ORDER BY g.created_at DESC
+                GROUP BY
+                    g.id,
+                    u.full_name
+                ORDER BY
+                    g.created_at DESC
                 `,
                 [`%${q}%`]
             );
@@ -1232,8 +1196,11 @@ app.get("/api/groups", async (req, res) => {
                     ON u.id = g.creator_id
                 LEFT JOIN cherychat_group_members gm
                     ON gm.group_id = g.id
-                GROUP BY g.id, u.full_name
-                ORDER BY g.created_at DESC
+                GROUP BY
+                    g.id,
+                    u.full_name
+                ORDER BY
+                    g.created_at DESC
                 `
             );
         }
@@ -1243,30 +1210,26 @@ app.get("/api/groups", async (req, res) => {
             groups: result.rows
         });
     } catch (error) {
-        console.error("Groups error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to load groups."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to load groups.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   MY GROUPS
-========================================================= */
-
 app.get("/api/groups/my", async (req, res) => {
     try {
-        const userId = Number(
-            req.query.userId
-        );
+        const userId =
+            getId(req.query.userId);
 
-        if (!validId(userId)) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user ID is required."
-            });
+        if (!userId) {
+            return sendError(
+                res,
+                400,
+                "Valid user ID is required."
+            );
         }
 
         const result = await pool.query(
@@ -1281,8 +1244,11 @@ app.get("/api/groups/my", async (req, res) => {
             LEFT JOIN cherychat_group_members allm
                 ON allm.group_id = g.id
             WHERE gm.user_id = $1
-            GROUP BY g.id, gm.role
-            ORDER BY g.created_at DESC
+            GROUP BY
+                g.id,
+                gm.role
+            ORDER BY
+                g.created_at DESC
             `,
             [userId]
         );
@@ -1292,92 +1258,142 @@ app.get("/api/groups/my", async (req, res) => {
             groups: result.rows
         });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: "Unable to load your groups."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to load your groups.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   CREATE GROUP
-========================================================= */
-
 app.post("/api/groups", async (req, res) => {
     try {
-        const creatorId = Number(
-            req.body.creatorId ||
-            req.body.userId
-        );
+        const creatorId =
+            getId(req.body.creatorId) ||
+            getId(req.body.creator_id) ||
+            getId(req.body.userId) ||
+            getId(req.body.user_id);
 
         const name = clean(
-            req.body.name
+            req.body.name ||
+            req.body.groupName ||
+            req.body.group_name
         );
 
         const description = clean(
-            req.body.description
+            req.body.description ||
+            req.body.groupDescription ||
+            req.body.group_description
         );
+
+        const groupPicture =
+            req.body.groupPicture ||
+            req.body.group_picture ||
+            null;
+
+        const privacy =
+            clean(req.body.privacy).toLowerCase();
 
         const isPrivate =
             req.body.isPrivate === true ||
-            req.body.is_private === true;
+            req.body.is_private === true ||
+            String(
+                req.body.isPrivate ||
+                req.body.is_private ||
+                ""
+            ).toLowerCase() === "true" ||
+            privacy === "private";
 
-        const joinFee = Number(
-            req.body.joinFee ||
-            req.body.join_fee ||
+        let joinFee = Number(
+            req.body.joinFee ??
+            req.body.join_fee ??
             0
         );
 
-        if (!validId(creatorId)) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid creator ID is required."
-            });
+        if (
+            !Number.isFinite(joinFee) ||
+            joinFee < 0
+        ) {
+            joinFee = 0;
+        }
+
+        if (!creatorId) {
+            return sendError(
+                res,
+                400,
+                "Valid creator ID is required."
+            );
         }
 
         if (!name) {
-            return res.status(400).json({
-                success: false,
-                message: "Group name is required."
-            });
+            return sendError(
+                res,
+                400,
+                "Group name is required."
+            );
         }
 
-        const group =
+        const creator =
+            await pool.query(
+                `
+                SELECT id
+                FROM cherychat_users
+                WHERE id = $1
+                `,
+                [creatorId]
+            );
+
+        if (!creator.rows.length) {
+            return sendError(
+                res,
+                404,
+                "Creator account not found."
+            );
+        }
+
+        const groupResult =
             await pool.query(
                 `
                 INSERT INTO cherychat_groups
                 (
                     name,
                     description,
+                    group_picture,
                     creator_id,
                     is_private,
                     join_fee
                 )
-                VALUES ($1,$2,$3,$4,$5)
+                VALUES ($1,$2,$3,$4,$5,$6)
                 RETURNING *
                 `,
                 [
                     name,
                     description,
+                    groupPicture,
                     creatorId,
                     isPrivate,
-                    joinFee >= 0
-                        ? joinFee
-                        : 0
+                    joinFee
                 ]
             );
 
-        const groupId =
-            group.rows[0].id;
+        const group =
+            groupResult.rows[0];
 
         await pool.query(
             `
             INSERT INTO cherychat_group_members
-            (group_id,user_id,role)
+            (
+                group_id,
+                user_id,
+                role
+            )
             VALUES ($1,$2,'admin')
+            ON CONFLICT (group_id,user_id)
+            DO UPDATE SET role = 'admin'
             `,
             [
-                groupId,
+                group.id,
                 creatorId
             ]
         );
@@ -1385,40 +1401,35 @@ app.post("/api/groups", async (req, res) => {
         res.status(201).json({
             success: true,
             message: "Group created successfully.",
-            group: group.rows[0]
+            group
         });
     } catch (error) {
-        console.error("Create group error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to create group."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to create group.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   GROUP DETAILS
-========================================================= */
-
 app.get("/api/groups/:id", async (req, res) => {
     try {
-        const groupId = Number(
-            req.params.id
-        );
+        const groupId =
+            numberId(req.params.id);
 
-        const userId = Number(
-            req.query.userId || 0
-        );
+        const userId =
+            getId(req.query.userId);
 
-        if (!validId(groupId)) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid group ID is required."
-            });
+        if (!groupId) {
+            return sendError(
+                res,
+                400,
+                "Valid group ID is required."
+            );
         }
 
-        const group =
+        const groupResult =
             await pool.query(
                 `
                 SELECT
@@ -1431,16 +1442,19 @@ app.get("/api/groups/:id", async (req, res) => {
                 LEFT JOIN cherychat_group_members gm
                     ON gm.group_id = g.id
                 WHERE g.id = $1
-                GROUP BY g.id, u.full_name
+                GROUP BY
+                    g.id,
+                    u.full_name
                 `,
                 [groupId]
             );
 
-        if (!group.rows.length) {
-            return res.status(404).json({
-                success: false,
-                message: "Group not found."
-            });
+        if (!groupResult.rows.length) {
+            return sendError(
+                res,
+                404,
+                "Group not found."
+            );
         }
 
         const members =
@@ -1470,7 +1484,7 @@ app.get("/api/groups/:id", async (req, res) => {
 
         let isMember = false;
 
-        if (validId(userId)) {
+        if (userId) {
             const member =
                 await pool.query(
                     `
@@ -1491,43 +1505,40 @@ app.get("/api/groups/:id", async (req, res) => {
 
         res.json({
             success: true,
-            group: group.rows[0],
-            members: members.rows,
+            group:
+                groupResult.rows[0],
+            members:
+                members.rows,
             isMember
         });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: "Unable to load group."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to load group.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   JOIN GROUP
-========================================================= */
-
 app.post("/api/groups/:id/join", async (req, res) => {
     try {
-        const groupId = Number(
-            req.params.id
-        );
+        const groupId =
+            numberId(req.params.id);
 
-        const userId = Number(
-            req.body.userId
-        );
+        const userId =
+            getId(req.body.userId) ||
+            getId(req.body.user_id);
 
-        if (
-            !validId(groupId) ||
-            !validId(userId)
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid group and user IDs are required."
-            });
+        if (!groupId || !userId) {
+            return sendError(
+                res,
+                400,
+                "Valid group and user IDs are required."
+            );
         }
 
-        const group =
+        const groupResult =
             await pool.query(
                 `
                 SELECT *
@@ -1537,23 +1548,23 @@ app.post("/api/groups/:id/join", async (req, res) => {
                 [groupId]
             );
 
-        if (!group.rows.length) {
-            return res.status(404).json({
-                success: false,
-                message: "Group not found."
-            });
+        if (!groupResult.rows.length) {
+            return sendError(
+                res,
+                404,
+                "Group not found."
+            );
         }
 
-        const data =
-            group.rows[0];
+        const group =
+            groupResult.rows[0];
 
-        if (Number(data.join_fee) > 0) {
+        if (Number(group.join_fee) > 0) {
             return res.json({
                 success: false,
                 paymentRequired: true,
-                joinFee: Number(
-                    data.join_fee
-                ),
+                joinFee:
+                    Number(group.join_fee),
                 message:
                     "Payment is required to join this private group."
             });
@@ -1562,7 +1573,11 @@ app.post("/api/groups/:id/join", async (req, res) => {
         await pool.query(
             `
             INSERT INTO cherychat_group_members
-            (group_id,user_id,role)
+            (
+                group_id,
+                user_id,
+                role
+            )
             VALUES ($1,$2,'member')
             ON CONFLICT (group_id,user_id)
             DO NOTHING
@@ -1578,37 +1593,31 @@ app.post("/api/groups/:id/join", async (req, res) => {
             message: "You joined the group."
         });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: "Unable to join group."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to join group.",
+            error
+        );
     }
 });
-
-/* =========================================================
-   GROUP MESSAGES
-========================================================= */
 
 app.get(
     "/api/groups/:id/messages",
     async (req, res) => {
         try {
-            const groupId = Number(
-                req.params.id
-            );
+            const groupId =
+                numberId(req.params.id);
 
-            const userId = Number(
-                req.query.userId
-            );
+            const userId =
+                getId(req.query.userId);
 
-            if (
-                !validId(groupId) ||
-                !validId(userId)
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Valid group and user IDs are required."
-                });
+            if (!groupId || !userId) {
+                return sendError(
+                    res,
+                    400,
+                    "Valid group and user IDs are required."
+                );
             }
 
             const member =
@@ -1626,10 +1635,11 @@ app.get(
                 );
 
             if (!member.rows.length) {
-                return res.status(403).json({
-                    success: false,
-                    message: "You are not a member of this group."
-                });
+                return sendError(
+                    res,
+                    403,
+                    "You are not a member of this group."
+                );
             }
 
             const result =
@@ -1647,61 +1657,61 @@ app.get(
                     JOIN cherychat_users u
                         ON u.id = gm.sender_id
                     WHERE gm.group_id = $1
-                    ORDER BY gm.created_at ASC
+                    ORDER BY
+                        gm.created_at ASC,
+                        gm.id ASC
                     `,
                     [groupId]
                 );
 
             res.json({
                 success: true,
-                messages: result.rows
+                messages:
+                    result.rows
             });
         } catch (error) {
-            res.status(500).json({
-                success: false,
-                message: "Unable to load group messages."
-            });
+            sendError(
+                res,
+                500,
+                "Unable to load group messages.",
+                error
+            );
         }
     }
 );
-
-/* =========================================================
-   SEND GROUP MESSAGE
-========================================================= */
 
 app.post(
     "/api/groups/:id/messages",
     async (req, res) => {
         try {
-            const groupId = Number(
-                req.params.id
-            );
+            const groupId =
+                numberId(req.params.id);
 
-            const senderId = Number(
-                req.body.senderId ||
-                req.body.userId
-            );
+            const senderId =
+                getId(req.body.senderId) ||
+                getId(req.body.sender_id) ||
+                getId(req.body.userId);
 
             const messageText = clean(
                 req.body.messageText ||
-                req.body.message
+                req.body.message ||
+                req.body.text
             );
 
-            if (
-                !validId(groupId) ||
-                !validId(senderId)
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Valid group and user IDs are required."
-                });
+            if (!groupId || !senderId) {
+                return sendError(
+                    res,
+                    400,
+                    "Valid group and user IDs are required."
+                );
             }
 
             if (!messageText) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Message cannot be empty."
-                });
+                return sendError(
+                    res,
+                    400,
+                    "Message cannot be empty."
+                );
             }
 
             const member =
@@ -1719,10 +1729,11 @@ app.post(
                 );
 
             if (!member.rows.length) {
-                return res.status(403).json({
-                    success: false,
-                    message: "You are not a member of this group."
-                });
+                return sendError(
+                    res,
+                    403,
+                    "You are not a member of this group."
+                );
             }
 
             const result =
@@ -1746,26 +1757,24 @@ app.post(
 
             res.status(201).json({
                 success: true,
-                message: result.rows[0]
+                message:
+                    result.rows[0]
             });
         } catch (error) {
-            res.status(500).json({
-                success: false,
-                message: "Unable to send group message."
-            });
+            sendError(
+                res,
+                500,
+                "Unable to send group message.",
+                error
+            );
         }
     }
 );
 
-/* =========================================================
-   STORIES
-========================================================= */
-
 app.get("/api/stories", async (req, res) => {
     try {
-        const userId = Number(
-            req.query.userId || 0
-        );
+        const userId =
+            getId(req.query.userId) || 0;
 
         const result =
             await pool.query(
@@ -1783,26 +1792,31 @@ app.get("/api/stories", async (req, res) => {
                     EXISTS (
                         SELECT 1
                         FROM cherychat_story_views sv
-                        WHERE sv.story_id = s.id
-                        AND sv.user_id = $1
+                        WHERE
+                            sv.story_id = s.id
+                            AND sv.user_id = $1
                     ) AS viewed_by_me
                 FROM cherychat_stories s
                 JOIN cherychat_users u
                     ON u.id = s.user_id
                 WHERE
                     s.expires_at > CURRENT_TIMESTAMP
-                ORDER BY s.created_at ASC
+                ORDER BY
+                    s.created_at ASC,
+                    s.id ASC
                 `,
                 [userId]
             );
 
-        const groups = {};
+        const usersMap = {};
 
         for (const story of result.rows) {
-            if (!groups[story.user_id]) {
-                groups[story.user_id] = {
-                    userId:
-                        story.user_id,
+            const uid =
+                Number(story.user_id);
+
+            if (!usersMap[uid]) {
+                usersMap[uid] = {
+                    userId: uid,
                     fullName:
                         story.full_name,
                     profilePicture:
@@ -1811,91 +1825,151 @@ app.get("/api/stories", async (req, res) => {
                 };
             }
 
-            groups[
-                story.user_id
-            ].stories.push({
-                id: story.id,
-                userId: story.user_id,
+            usersMap[uid].stories.push({
+                id:
+                    Number(story.id),
+
+                userId:
+                    uid,
+
                 fullName:
                     story.full_name,
+
                 profilePicture:
                     story.profile_picture,
+
                 mediaType:
                     story.media_type,
+
                 mediaData:
                     story.media_data,
+
                 caption:
-                    story.caption,
+                    story.caption || "",
+
                 createdAt:
                     story.created_at,
+
                 expiresAt:
                     story.expires_at,
+
                 viewedByMe:
-                    story.viewed_by_me,
+                    story.viewed_by_me === true,
+
                 isOwn:
-                    Number(story.user_id) ===
-                    userId
+                    uid === userId
             });
         }
 
         res.json({
             success: true,
-            stories: result.rows,
-            users: Object.values(groups)
+            stories:
+                result.rows,
+            users:
+                Object.values(usersMap)
         });
     } catch (error) {
-        console.error("Stories error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to load stories."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to load stories.",
+            error
+        );
     }
 });
 
-/* =========================================================
-   CREATE STORY
-========================================================= */
-
 app.post("/api/stories", async (req, res) => {
     try {
-        const userId = Number(
-            req.body.userId
-        );
+        const userId =
+            getId(req.body.userId) ||
+            getId(req.body.user_id) ||
+            getId(req.body.id);
 
-        const mediaType = clean(
-            req.body.mediaType
-        );
+        let mediaType = clean(
+            req.body.mediaType ||
+            req.body.media_type ||
+            req.body.type
+        ).toLowerCase();
 
         const mediaData =
-            req.body.mediaData;
+            req.body.mediaData ||
+            req.body.media_data ||
+            req.body.data ||
+            req.body.image ||
+            req.body.video;
 
         const caption = clean(
-            req.body.caption
+            req.body.caption ||
+            req.body.text
         );
 
-        if (!validId(userId)) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user ID is required."
-            });
+        if (
+            mediaType.startsWith("image/")
+        ) {
+            mediaType = "image";
+        }
+
+        if (
+            mediaType.startsWith("video/")
+        ) {
+            mediaType = "video";
+        }
+
+        if (
+            mediaType === "photo"
+        ) {
+            mediaType = "image";
+        }
+
+        if (
+            mediaType === "mp4"
+        ) {
+            mediaType = "video";
+        }
+
+        if (!userId) {
+            return sendError(
+                res,
+                400,
+                "Valid user ID is required."
+            );
         }
 
         if (
             mediaType !== "image" &&
             mediaType !== "video"
         ) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid story media type."
-            });
+            return sendError(
+                res,
+                400,
+                "Invalid story media type."
+            );
         }
 
         if (!mediaData) {
-            return res.status(400).json({
-                success: false,
-                message: "Story media is required."
-            });
+            return sendError(
+                res,
+                400,
+                "Story media is required."
+            );
+        }
+
+        const user =
+            await pool.query(
+                `
+                SELECT id
+                FROM cherychat_users
+                WHERE id = $1
+                `,
+                [userId]
+            );
+
+        if (!user.rows.length) {
+            return sendError(
+                res,
+                404,
+                "User account not found."
+            );
         }
 
         const result =
@@ -1914,59 +1988,74 @@ app.post("/api/stories", async (req, res) => {
                 [
                     userId,
                     mediaType,
-                    mediaData,
+                    String(mediaData),
                     caption
                 ]
             );
 
         res.status(201).json({
             success: true,
-            message: "Story posted successfully.",
-            story: result.rows[0]
+            message:
+                "Story posted successfully.",
+            story:
+                result.rows[0]
         });
     } catch (error) {
-        console.error("Create story error:", error);
-
-        res.status(500).json({
-            success: false,
-            message: "Unable to post story."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to post story.",
+            error
+        );
     }
 });
-
-/* =========================================================
-   VIEW STORY
-========================================================= */
 
 app.post(
     "/api/stories/:id/view",
     async (req, res) => {
         try {
-            const storyId = Number(
-                req.params.id
-            );
+            const storyId =
+                numberId(req.params.id);
 
-            const userId = Number(
-                req.body.userId
-            );
+            const userId =
+                getId(req.body.userId) ||
+                getId(req.body.user_id);
 
-            if (
-                !validId(storyId) ||
-                !validId(userId)
-            ) {
-                return res.status(400).json({
-                    success: false,
-                    message: "Valid story and user IDs are required."
-                });
+            if (!storyId || !userId) {
+                return sendError(
+                    res,
+                    400,
+                    "Valid story and user IDs are required."
+                );
+            }
+
+            const story =
+                await pool.query(
+                    `
+                    SELECT id
+                    FROM cherychat_stories
+                    WHERE id = $1
+                    `,
+                    [storyId]
+                );
+
+            if (!story.rows.length) {
+                return sendError(
+                    res,
+                    404,
+                    "Story not found."
+                );
             }
 
             await pool.query(
                 `
                 INSERT INTO cherychat_story_views
-                (story_id,user_id)
+                (
+                    story_id,
+                    user_id
+                )
                 VALUES ($1,$2)
-                ON CONFLICT
-                (story_id,user_id)
+                ON CONFLICT (story_id,user_id)
                 DO NOTHING
                 `,
                 [
@@ -1979,20 +2068,29 @@ app.post(
                 success: true
             });
         } catch (error) {
-            res.status(500).json({
-                success: false,
-                message: "Unable to record story view."
-            });
+            sendError(
+                res,
+                500,
+                "Unable to record story view.",
+                error
+            );
         }
     }
 );
 
-/* =========================================================
-   DELETE EXPIRED STORIES
-========================================================= */
-
 async function deleteExpiredStories() {
     try {
+        await pool.query(
+            `
+            DELETE FROM cherychat_story_views
+            WHERE story_id IN (
+                SELECT id
+                FROM cherychat_stories
+                WHERE expires_at <= CURRENT_TIMESTAMP
+            )
+            `
+        );
+
         await pool.query(
             `
             DELETE FROM cherychat_stories
@@ -2012,27 +2110,25 @@ setInterval(
     60 * 60 * 1000
 );
 
-/* =========================================================
-   LOGOUT
-========================================================= */
-
 app.post("/api/logout", async (req, res) => {
     try {
-        const userId = Number(
-            req.body.userId
-        );
+        const userId =
+            getId(req.body.userId) ||
+            getId(req.body.id);
 
-        if (!validId(userId)) {
-            return res.status(400).json({
-                success: false,
-                message: "Valid user ID is required."
-            });
+        if (!userId) {
+            return sendError(
+                res,
+                400,
+                "Valid user ID is required."
+            );
         }
 
         await pool.query(
             `
             UPDATE cherychat_users
-            SET is_online = FALSE,
+            SET
+                is_online = FALSE,
                 last_seen = CURRENT_TIMESTAMP
             WHERE id = $1
             `,
@@ -2041,36 +2137,41 @@ app.post("/api/logout", async (req, res) => {
 
         res.json({
             success: true,
-            message: "Logged out successfully."
+            message:
+                "Logged out successfully."
         });
     } catch (error) {
-        res.status(500).json({
-            success: false,
-            message: "Unable to logout."
-        });
+        sendError(
+            res,
+            500,
+            "Unable to logout.",
+            error
+        );
     }
 });
-
-/* =========================================================
-   404
-========================================================= */
 
 app.use((req, res) => {
     res.status(404).json({
         success: false,
-        message: "VibeChat API endpoint not found."
+        message:
+            "VibeChat API endpoint not found."
     });
 });
-
-/* =========================================================
-   SERVER
-========================================================= */
 
 const PORT =
     process.env.PORT || 10000;
 
-app.listen(PORT, () => {
-    console.log(
-        `VibeChat API running on port ${PORT}`
-    );
-});
+setupDatabase()
+    .then(() => {
+        app.listen(PORT, () => {
+            console.log(
+                `VibeChat API running on port ${PORT}`
+            );
+        });
+    })
+    .catch(error => {
+        console.error(
+            "VibeChat server startup failed:",
+            error
+        );
+    });
